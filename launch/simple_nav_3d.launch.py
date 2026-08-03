@@ -8,9 +8,15 @@ Usage:
 Arguments:
   robot   - Robot name (default: atlas). Sets namespace + frame prefix.
   mode    - "ugv" or "uav" (default: ugv). Selects pipeline, sensor config, body size.
-  mapping - "dscovox", "scovox", or "none" (default: dscovox). Selects mapping backend.
+  mapping - "dscovox", "dscovox_lidar", "scovox", or "none" (default: dscovox).
+            Selects mapping backend.
             "dscovox" runs scovox_node (local persistent grid, rolling planning_map)
-                      + dscovox_node (global merger).
+                      + dscovox_node (global merger). RGB-D + segmentation input.
+            "dscovox_lidar" same topology, but scovox_node integrates the
+                      /<robot>/velodyne_points lidar cloud instead (geometric
+                      only, no semantics; sensor model from
+                      scovox/config/scovox_lidar_geometric.yaml). Nav costmap
+                      points input switches to the lidar too.
             "scovox"  runs scovox_node alone in persistent mode (no merger).
 """
 
@@ -33,6 +39,13 @@ def launch_setup(context):
     # this robot a per-robot fused view of the whole team's mapping.
     peers_raw = LaunchConfiguration("peers").perform(context)
     peers = [p.strip() for p in peers_raw.split(",") if p.strip()]
+
+    # fine_band:=true layers the fine-TSDF refinement-band overlay
+    # (scovox/config/scovox_fine_band.yaml) onto the scovox_node. Regions
+    # arrive on /<robot>/scovox_node/refinement_region; the fine cloud is
+    # published on /<robot>/scovox_node/fine_tsdf_pointcloud.
+    fine_band = LaunchConfiguration("fine_band").perform(context).lower() \
+        in ("true", "1", "yes")
 
     is_uav = mode == "uav"
 
@@ -139,6 +152,19 @@ def launch_setup(context):
             "ugv.replan_cost_threshold_m": 6.5,
             "ugv.side_flip_cooldown_sec": 3.0,
             "ugv.global_map_min_hits": 10,
+        })
+
+    # ── Lidar-input overrides (dscovox_lidar mode) ─────────────────────
+    # The nav costmap's sensor-based local_map must read the lidar instead of
+    # the (absent) rgbd cloud. sensors.type stays "rgbd" — parameters.cpp
+    # validates the literal and nothing else reads it.
+    if mapping == "dscovox_lidar":
+        nav_params.update({
+            "topics.points": f"/{robot}/velodyne_points",
+            "sensors.sensor_mount_height_m": 0.716,   # velodyne z on base_link
+            "sensors.max_range_m": 20.0,
+            "sensors.min_range_m": 0.8,               # reject self-hits
+            "sensors.expected_rate_hz": 10.0,
         })
 
     nodes = []
@@ -251,6 +277,101 @@ def launch_setup(context):
             }],
         ))
 
+    elif mapping == "dscovox_lidar":
+        # Same rolling-mapper + per-robot-merger topology as "dscovox", but
+        # scovox_node integrates the lidar cloud (geometric Beta occupancy,
+        # no semantics). Sensor model mirrors
+        # scovox/config/scovox_lidar_geometric.yaml; share cadence mirrors
+        # scovox_robot_share.yaml (2 Hz coalesced deltas on the wire).
+        scovox_fine_extra = {}
+        if fine_band:
+            # Mirrors scovox/config/scovox_fine_band.yaml (base 0.10 m ->
+            # fine 0.025 m, trunc 7.5 cm, slab brackets breast height).
+            scovox_fine_extra = {
+                "fine_ratio_log2": 2,
+                "fine_sdf_trunc_voxels": 3,
+                "fine_region_margin": 0.15,
+                "fine_raw_returns": True,
+                "fine_anchor_enable": True,
+                "fine_anchor_min_points": 12,
+                "fine_anchor_max_shift": 0.30,
+                "fine_region_z_lo": 1.0,
+                "fine_region_z_hi": 1.6,
+                "publish_fine_tsdf_pointcloud": True,
+            }
+        scovox_lidar_params = [{
+                "use_sim_time": True,
+                "mode": "rolling",
+                # THE input switch: non-empty pointcloud topic selects the
+                # lidar path; fuse_lidar_rgbd=false drops every depth/seg sub.
+                "input_pointcloud_topic": f"/{robot}/velodyne_points",
+                "fuse_lidar_rgbd": False,
+                # gz PointCloudPacked has no per-point time field; "off" also
+                # skips the IMU subscription + lidar-imu extrinsic lookups.
+                "deskew_mode": "off",
+                "integration_frame": f"{robot}/odom",
+                # On the non-fused lidar path base_frame IS the ray origin.
+                "base_frame": f"{robot}/velodyne",
+                "scovox_topic": "~/scovox",
+                "pointcloud_topic": "~/pointcloud",
+                "robot_id": robot,
+                # Lidar sensor model (scovox_lidar_geometric.yaml)
+                "resolution": 0.10,
+                "w_occ": 8.0,
+                "w_free": 4.0,
+                "carve_band": -1.0,        # full-ray free-space carve
+                "min_range": 1.0,
+                "max_range": 20.0,
+                "range_decay_length": -1.0,
+                "grazing_angle_threshold": -1.0,
+                "enable_tsdf": False,
+                # Required for real-time full-ray carve on a dense scan.
+                "downsample_voxel_size": 0.10,
+                # Wire-stream cadence to the mergers (scovox_robot_share.yaml).
+                # No share_roi_z clip: full vertical extent in the fused map,
+                # matching the rgbd campaign.
+                "share_change_gate": True,
+                "share_rate_hz": 2.0,
+                "publish_planning_map": True,
+                "planning_map_topic": "~/planning_map",
+                "planning_map_resolution": 0.20,
+                "planning_map_window_size_m": 20.0,
+                "planning_map_min_z": 0.05,
+                "planning_map_max_z": 1.0,
+                "planning_map_inflation_m": 1.5,
+            }]
+        if scovox_fine_extra:
+            scovox_lidar_params.append(scovox_fine_extra)
+        nodes.append(Node(
+            package="scovox_mapping",
+            executable="scovox_mapping_node",
+            namespace=robot,
+            name="scovox_node",
+            output="screen",
+            arguments=["--ros-args", "--log-level", "warn"],
+            parameters=scovox_lidar_params,
+        ))
+
+        # Per-robot merger, identical to the "dscovox" one (sensor-agnostic —
+        # it fuses ScovoxMapBinary streams). The planning_map_* params the
+        # rgbd block passes are undeclared no-ops in dscovox_node, dropped here.
+        dscovox_inputs = [f"/{r}/scovox_node/scovox_bin" for r in [robot] + peers]
+        nodes.append(Node(
+            package="scovox_mapping",
+            executable="dscovox_mapping_node",
+            namespace=robot,
+            name="dscovox_node",
+            output="screen",
+            arguments=["--ros-args", "--log-level", "info"],
+            parameters=[{
+                "use_sim_time": True,
+                "input_topics": dscovox_inputs,
+                "pointcloud_topic": "~/pointcloud",
+                "map_frame": "map",
+                "publish_rate_hz": 1.0,
+            }],
+        ))
+
     # ── Navigation nodes (all namespaced under robot) ──────────────────
 
     # Costmap node:
@@ -280,7 +401,7 @@ def launch_setup(context):
     # service instead of a 2D map. In other modes it falls back to the
     # costmap-built global map via topics.planning_map default.
     global_planner_extra = {"pipeline.role": "global"}
-    if mapping == "dscovox":
+    if mapping in ("dscovox", "dscovox_lidar"):
         global_planner_extra["topics.planning_map"] = f"/{robot}/dscovox_node/planning_map"
         if is_uav:
             global_planner_extra["scovox_get_region_service"] = f"/{robot}/dscovox_node/get_region"
@@ -304,7 +425,7 @@ def launch_setup(context):
     # contradicting it. If the corridor is blocked (new obstacle on the global
     # path) the local planner retries with a free A*. Side-flip rejection is
     # still disabled here because the corridor already serves the same role.
-    if mapping == "dscovox" and not is_uav:
+    if mapping in ("dscovox", "dscovox_lidar") and not is_uav:
         local_planner_extra = {
             "pipeline.role": "local",
             "topics.local_planning_map": f"/{robot}/scovox_node/planning_map",
@@ -325,7 +446,7 @@ def launch_setup(context):
     # ── Controller ────────────────────────────────────────────────────
     # In dscovox UGV mode the controller follows the local planner's output;
     # otherwise it follows the global planner's output.
-    if mapping == "dscovox" and not is_uav:
+    if mapping in ("dscovox", "dscovox_lidar") and not is_uav:
         controller_extra = {
             "pipeline.role": "local",
             "topics.local_path": f"/{robot}/simple_nav_3d/local_path",
@@ -367,5 +488,10 @@ def generate_launch_description():
                               description="Comma-separated peer robot names "
                               "for multi-robot DSCovox topology. Empty = "
                               "single-robot (self only)."),
+        DeclareLaunchArgument("fine_band", default_value="false",
+                              description="true = enable the fine-TSDF "
+                              "refinement band on the scovox_node "
+                              "(dscovox_lidar mode; mirrors "
+                              "scovox_fine_band.yaml)."),
         OpaqueFunction(function=launch_setup),
     ])
