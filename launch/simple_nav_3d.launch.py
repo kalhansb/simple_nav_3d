@@ -40,6 +40,73 @@ def launch_setup(context):
     peers_raw = LaunchConfiguration("peers").perform(context)
     peers = [p.strip() for p in peers_raw.split(",") if p.strip()]
 
+    # Where this robot's merger listens for each PEER's scovox binary. The
+    # default is the peer's own publisher, i.e. today's behaviour unchanged.
+    # Under the message-level comms emulator the peer streams arrive instead on
+    # its relayed copies, and repointing the merger at those is the whole
+    # mechanism by which map sharing obeys the radio model: left on the direct
+    # topics, every robot merges every peer's map instantly and perfectly, and
+    # the comms arm of an experiment silently degenerates into the control arm
+    # while still producing a full set of plausible results.
+    #
+    # Placeholders: {peer} (or {robot}) = the peer being subscribed to, {self} =
+    # this robot. The emulator's relay convention is
+    #   "/{self}/rx/{peer}/scovox_node/scovox_bin".
+    #
+    # Self is deliberately NOT patterned. A robot's own binary never crosses a
+    # radio link, and routing it through an rx topic would leave the robot
+    # unable to see its own map whenever its own link was down — every arm would
+    # then measure a mapping failure rather than a comms one.
+    peer_bin_pattern = LaunchConfiguration(
+        "peer_bin_topic_pattern").perform(context)
+
+    def dscovox_input_topics():
+        return [f"/{robot}/scovox_node/scovox_bin"] + [
+            peer_bin_pattern.format(peer=p, robot=p, self=robot)
+            for p in peers
+        ]
+
+    # Second, world-fixed planning map published by scovox_node for an
+    # EXPLORATION planner (explo_planner), on ~/global_planning_map.
+    #
+    # It cannot share ~/planning_map with the local nav planner: that one is a
+    # 20 m robot-centred crop, and simple_nav_3d's local planner has no window
+    # param of its own — the map extent IS its window, so widening it would put
+    # the whole world through the local A*/corridor mask on the control path.
+    # The exploration planner needs the opposite: a fixed envelope covering the
+    # ROI, because it rejects candidates whose cell is out of bounds and
+    # measures coverage termination over the ROI clipped to the grid. Hence two
+    # publishers over the same voxel grid.
+    #
+    # Sizing: the envelope is world-fixed and centred on the world origin, and
+    # so is the planner's ROI, so the side must be at least the ROI SIDE
+    # (= 2 x roi half-extent) to cover it, plus margin for a robot that drifts
+    # outside the ROI — its own cell must be in bounds or the reachability
+    # flood starts nowhere. Default 0 = off, which is what every
+    # non-exploration run wants.
+    plan_glob_size = float(
+        LaunchConfiguration("global_planning_map_size_m").perform(context))
+    plan_glob_res = float(
+        LaunchConfiguration("global_planning_map_resolution").perform(context))
+    plan_glob_period = float(
+        LaunchConfiguration("global_planning_map_period_sec").perform(context))
+    scovox_global_plan_params = {}
+    if plan_glob_size > 0.0:
+        scovox_global_plan_params = {
+            "publish_global_planning_map": True,
+            "global_planning_map_topic": "~/global_planning_map",
+            "global_planning_map_size_m": plan_glob_size,
+            # Centred on the world origin, matching the explo_planner ROI
+            # convention (roi_min/max are symmetric about the origin in sim).
+            "global_planning_map_origin_x": -0.5 * plan_glob_size,
+            "global_planning_map_origin_y": -0.5 * plan_glob_size,
+            "global_planning_map_resolution": plan_glob_res,
+            "global_planning_map_period_sec": plan_glob_period,
+            # Same inflation as the local map: explo_planner does a single-cell
+            # free check and relies on the map already carrying the body radius.
+            "global_planning_map_inflation_m": 1.5,
+        }
+
     # fine_band:=true layers the fine-TSDF refinement-band overlay
     # (scovox/config/scovox_fine_band.yaml) onto the scovox_node. Regions
     # arrive on /<robot>/scovox_node/refinement_region; the fine cloud is
@@ -237,6 +304,7 @@ def launch_setup(context):
                 "planning_map_min_z": 0.05,
                 "planning_map_max_z": 1.0,
                 "planning_map_inflation_m": 1.5,
+                **scovox_global_plan_params,
             }],
         ))
 
@@ -248,7 +316,7 @@ def launch_setup(context):
         # (self + peers). Each robot's dscovox_node is its own per-robot
         # consensus merger -- there is no central merger. With peers=[] the
         # input list collapses to the single-robot case.
-        dscovox_inputs = [f"/{r}/scovox_node/scovox_bin" for r in [robot] + peers]
+        dscovox_inputs = dscovox_input_topics()
         nodes.append(Node(
             package="scovox_mapping",
             executable="dscovox_mapping_node",
@@ -262,6 +330,12 @@ def launch_setup(context):
                 "pointcloud_topic": "~/pointcloud",
                 "map_frame": "map",
                 "publish_rate_hz": 1.0,
+                # Match the comms emulator's rx_qos_depth. On reconnect the
+                # relay releases a whole outage's backlog in one pass; a
+                # shallower reader here silently discards the excess and the
+                # fused map is permanently holed with no counter recording it.
+                # Harmless without the emulator — it is only a history bound.
+                "scovox_bin_qos_depth": 500,
                 "publish_planning_map": True,
                 "planning_map_topic": "~/planning_map",
                 "planning_map_resolution": 0.20,
@@ -339,6 +413,7 @@ def launch_setup(context):
                 "planning_map_min_z": 0.05,
                 "planning_map_max_z": 1.0,
                 "planning_map_inflation_m": 1.5,
+                **scovox_global_plan_params,
             }]
         if scovox_fine_extra:
             scovox_lidar_params.append(scovox_fine_extra)
@@ -355,7 +430,7 @@ def launch_setup(context):
         # Per-robot merger, identical to the "dscovox" one (sensor-agnostic —
         # it fuses ScovoxMapBinary streams). The planning_map_* params the
         # rgbd block passes are undeclared no-ops in dscovox_node, dropped here.
-        dscovox_inputs = [f"/{r}/scovox_node/scovox_bin" for r in [robot] + peers]
+        dscovox_inputs = dscovox_input_topics()
         nodes.append(Node(
             package="scovox_mapping",
             executable="dscovox_mapping_node",
@@ -369,6 +444,12 @@ def launch_setup(context):
                 "pointcloud_topic": "~/pointcloud",
                 "map_frame": "map",
                 "publish_rate_hz": 1.0,
+                # Match the comms emulator's rx_qos_depth. On reconnect the
+                # relay releases a whole outage's backlog in one pass; a
+                # shallower reader here silently discards the excess and the
+                # fused map is permanently holed with no counter recording it.
+                # Harmless without the emulator — it is only a history bound.
+                "scovox_bin_qos_depth": 500,
             }],
         ))
 
@@ -488,6 +569,40 @@ def generate_launch_description():
                               description="Comma-separated peer robot names "
                               "for multi-robot DSCovox topology. Empty = "
                               "single-robot (self only)."),
+        DeclareLaunchArgument(
+            "peer_bin_topic_pattern",
+            default_value="/{peer}/scovox_node/scovox_bin",
+            description="Topic pattern for each PEER's scovox binary feeding "
+                        "this robot's dscovox merger. Placeholders: {peer} "
+                        "(alias {robot}) = peer name, {self} = this robot. "
+                        "Default subscribes to the peers directly (no comms "
+                        "model). Under the comms emulator use "
+                        "'/{self}/rx/{peer}/scovox_node/scovox_bin' so map "
+                        "sharing goes through the modelled link. Self is "
+                        "always subscribed directly and is unaffected."),
+        DeclareLaunchArgument(
+            "global_planning_map_size_m", default_value="0.0",
+            description="Side length (m) of scovox_node's second, WORLD-FIXED "
+                        "planning map on ~/global_planning_map, centred on the "
+                        "world origin. 0 = disabled (default). This is the map "
+                        "an exploration planner consumes; ~/planning_map stays "
+                        "the local nav planner's rolling crop either way. Must "
+                        "be at least the explo_planner ROI SIDE (2 x its half-"
+                        "extent), plus margin, or candidates outside the "
+                        "envelope are rejected as occupied and the coverage "
+                        "check measures the wrong area."),
+        DeclareLaunchArgument(
+            "global_planning_map_resolution", default_value="0.40",
+            description="Cell size (m) of ~/global_planning_map. Coarser than "
+                        "the local map on purpose: it is inflated by the body "
+                        "radius and only used for single-cell free/occupied "
+                        "checks and a reachability flood."),
+        DeclareLaunchArgument(
+            "global_planning_map_period_sec", default_value="1.0",
+            description="Min seconds between ~/global_planning_map publishes. "
+                        "The projection + inflation run on scovox_node's "
+                        "integration thread, so this is a real-time budget, "
+                        "not just bandwidth. 0 = every integration frame."),
         DeclareLaunchArgument("fine_band", default_value="false",
                               description="true = enable the fine-TSDF "
                               "refinement band on the scovox_node "
