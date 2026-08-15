@@ -60,6 +60,28 @@ def launch_setup(context):
     peer_bin_pattern = LaunchConfiguration(
         "peer_bin_topic_pattern").perform(context)
 
+    # scovox voxel edge length (m) on the lidar path. Default 0.10 = the value
+    # this launch has always used.
+    #
+    # It is the single biggest cost driver in a long run, and the cost is cubic:
+    # the lidar path carves free space along the WHOLE ray (carve_band -1) out to
+    # max_range 20 m, so every beam writes ~200 voxels at 0.10 m. Measured on a
+    # 2-robot flatforest run, the fused map reached 12.7M voxels by t=550 s and
+    # was still growing linearly with explored area. Everything that touches the
+    # map scales with it -- dscovox integration, the full ScovoxMap publish, and
+    # the planner's ingest plus whole-grid walk -- so past a few million voxels
+    # the planner's map subscription simply stops keeping up. That failure is
+    # silent and dangerous: one robot ran for three minutes on a frozen map,
+    # still driving, still logging steps, its coverage curve flat while its
+    # teammate's kept climbing.
+    #
+    # Raising this 0.10 -> 0.20 cuts the count ~8x. It also shrinks the
+    # ScovoxMapBinary delta payload by about as much, which matters beyond
+    # performance whenever the run is under a comms model: the deltas ARE what
+    # the radio carries, so severity calibration must be done at the resolution
+    # the campaign will actually run at, never carried over from another.
+    voxel_res = float(LaunchConfiguration("voxel_resolution_m").perform(context))
+
     def dscovox_input_topics():
         return [f"/{robot}/scovox_node/scovox_bin"] + [
             peer_bin_pattern.format(peer=p, robot=p, self=robot)
@@ -390,7 +412,7 @@ def launch_setup(context):
                 "pointcloud_topic": "~/pointcloud",
                 "robot_id": robot,
                 # Lidar sensor model (scovox_lidar_geometric.yaml)
-                "resolution": 0.10,
+                "resolution": voxel_res,
                 "w_occ": 8.0,
                 "w_free": 4.0,
                 "carve_band": -1.0,        # full-ray free-space carve
@@ -569,6 +591,16 @@ def generate_launch_description():
                               description="Comma-separated peer robot names "
                               "for multi-robot DSCovox topology. Empty = "
                               "single-robot (self only)."),
+        DeclareLaunchArgument(
+            "voxel_resolution_m", default_value="0.10",
+            description="scovox voxel edge length (m) on the lidar path. "
+                        "Dominates map size and therefore every consumer's "
+                        "cost: free space is carved along the whole ray to "
+                        "max_range, so the voxel count grows as res^-3. 0.20 "
+                        "is ~8x cheaper than the 0.10 default and shrinks the "
+                        "ScovoxMapBinary delta payload by about as much - "
+                        "which changes what a comms model has to carry, so "
+                        "calibrate severity at the resolution you will run."),
         DeclareLaunchArgument(
             "peer_bin_topic_pattern",
             default_value="/{peer}/scovox_node/scovox_bin",
