@@ -357,7 +357,15 @@ def launch_setup(context):
                 # shallower reader here silently discards the excess and the
                 # fused map is permanently holed with no counter recording it.
                 # Harmless without the emulator — it is only a history bound.
-                "scovox_bin_qos_depth": 500,
+                #
+                # 500 -> 4000 (2026-08-16). At 500 this was the SHALLOW end of
+                # the chain for the 250 stems/ha world: 861 s outages queue
+                # ~1720 deltas at the ~2 Hz share rate, so all three dense cells
+                # finished with their two merged maps 1.5-1.8 % apart and every
+                # gate green. Keep this equal to comms_sim_params.yaml's
+                # rx_qos_depth — raising only one end fixes nothing, because the
+                # burst is discarded at whichever end is shallower.
+                "scovox_bin_qos_depth": 4000,
                 "publish_planning_map": True,
                 "planning_map_topic": "~/planning_map",
                 "planning_map_resolution": 0.20,
@@ -471,7 +479,15 @@ def launch_setup(context):
                 # shallower reader here silently discards the excess and the
                 # fused map is permanently holed with no counter recording it.
                 # Harmless without the emulator — it is only a history bound.
-                "scovox_bin_qos_depth": 500,
+                #
+                # 500 -> 4000 (2026-08-16). At 500 this was the SHALLOW end of
+                # the chain for the 250 stems/ha world: 861 s outages queue
+                # ~1720 deltas at the ~2 Hz share rate, so all three dense cells
+                # finished with their two merged maps 1.5-1.8 % apart and every
+                # gate green. Keep this equal to comms_sim_params.yaml's
+                # rx_qos_depth — raising only one end fixes nothing, because the
+                # burst is discarded at whichever end is shallower.
+                "scovox_bin_qos_depth": 4000,
             }],
         ))
 
