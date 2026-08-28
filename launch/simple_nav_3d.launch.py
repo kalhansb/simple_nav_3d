@@ -129,6 +129,39 @@ def launch_setup(context):
             "global_planning_map_inflation_m": 1.5,
         }
 
+    # The SAME world-fixed envelope, published by the MERGER over the FUSED
+    # grid. scovox_node's copy above sees only what this robot measured itself;
+    # dscovox_node's sees the team map, which is the domain the exploration
+    # planner's candidates and its coverage-termination test actually live in.
+    # Pointing the planner at the local map while it plans over the fused one
+    # is a map-domain mismatch: a candidate in ground the PARTNER surveyed is
+    # unknown-and-therefore-unreachable on the local map, so it is rejected.
+    # Identical envelope and resolution to the scovox copy on purpose — the
+    # two are meant to be comparable cell-for-cell, and the planner ROI is
+    # sized against this side length.
+    #
+    # NOTE the topic: ~/global_planning_map, never ~/planning_map. The nav
+    # global planner below already subscribes to
+    # /<robot>/dscovox_node/planning_map, a topic that has never had a
+    # publisher. Reusing that name would silently activate it as a second,
+    # uncontrolled behavioural change.
+    dscovox_global_plan_params = {}
+    if plan_glob_size > 0.0:
+        dscovox_global_plan_params = {
+            "publish_global_planning_map": True,
+            "global_planning_map_topic": "~/global_planning_map",
+            "global_planning_map_size_m": plan_glob_size,
+            "global_planning_map_origin_x": -0.5 * plan_glob_size,
+            "global_planning_map_origin_y": -0.5 * plan_glob_size,
+            "global_planning_map_resolution": plan_glob_res,
+            "global_planning_map_period_sec": plan_glob_period,
+            "global_planning_map_inflation_m": 1.5,
+            # Same body slab as the scovox planning maps, so canopy is not
+            # projected down onto the floor as an obstacle.
+            "global_planning_map_min_z": 0.05,
+            "global_planning_map_max_z": 1.0,
+        }
+
     # fine_band:=true layers the fine-TSDF refinement-band overlay
     # (scovox/config/scovox_fine_band.yaml) onto the scovox_node. Regions
     # arrive on /<robot>/scovox_node/refinement_region; the fine cloud is
@@ -366,6 +399,12 @@ def launch_setup(context):
                 # rx_qos_depth — raising only one end fixes nothing, because the
                 # burst is discarded at whichever end is shallower.
                 "scovox_bin_qos_depth": 4000,
+                **dscovox_global_plan_params,
+                # NOTE: the planning_map_* block below is an undeclared no-op in
+                # dscovox_node — it has never had a ~/planning_map publisher.
+                # Kept as-is rather than removed, because the nav global planner
+                # subscribes to that topic and making it real is a separate,
+                # deliberate decision (see the dscovox_global_plan_params note).
                 "publish_planning_map": True,
                 "planning_map_topic": "~/planning_map",
                 "planning_map_resolution": 0.20,
@@ -474,6 +513,7 @@ def launch_setup(context):
                 "pointcloud_topic": "~/pointcloud",
                 "map_frame": "map",
                 "publish_rate_hz": 1.0,
+                **dscovox_global_plan_params,
                 # Match the comms emulator's rx_qos_depth. On reconnect the
                 # relay releases a whole outage's backlog in one pass; a
                 # shallower reader here silently discards the excess and the
