@@ -159,6 +159,46 @@ std::string UgvController::name() const
   return "local_controller_ugv";
 }
 
+// An empty global path ends any recovery in progress, and says so. Two reasons.
+//
+// Correctness: the path empties when the goal is reached, cleared, or
+// withdrawn, and both pieces of recovery state were chosen for the OLD goal —
+// the backup distance is measured from the pose at entry, and the turn target
+// is an ABSOLUTE yaw computed once from the obstacle that was blocking then.
+// Previously the recovery merely suspended (the node stops calling
+// compute_command on an empty path) and resumed on the next non-empty path.
+// That resume steers toward a heading nothing has re-measured, from a
+// displacement origin the robot may have already left, and it owns the command
+// stream for up to the tick cap while doing it. Worse, a nav-budget expiry is
+// one of the most likely ways for a goal to be withdrawn, and a robot in
+// recovery is precisely a robot whose goal is about to time out — so this is
+// not a corner case, it is the common exit from a recovery.
+//
+// Pairing: a suspended recovery also produced a `-> recovery:` entry with no
+// `recovery EXIT:`, which in a grep is indistinguishable from a recovery that
+// never terminated — the one failure mode the entry/exit pairing check exists
+// to detect. It reported a fault that had not happened while masking the one
+// that had.
+//
+// This lives here, and not in compute_command's empty-path guard, because the
+// node does not call compute_command at all when the path is empty: a check
+// there is unreachable code that reads as if it works.
+void UgvController::on_path_cleared()
+{
+  if (!recovery_active_) {
+    return;   // idempotent: called every tick the path stays empty
+  }
+  // Read the phase before overwriting it, or the line always says TURN.
+  const char * phase = recovery_phase_ == RecoveryPhase::BACKUP ? "BACKUP" : "TURN";
+  recovery_active_ = false;
+  recovery_phase_ = RecoveryPhase::DONE;
+  fprintf(stderr,
+    "[ugv_ctrl] recovery EXIT: PATH CLEARED after %d ticks in %s (goal reached "
+    "or withdrawn mid-recovery)\n",
+    recovery_ticks_, phase);
+  fflush(stderr);
+}
+
 geometry_msgs::msg::Twist UgvController::compute_command(
   const nav_msgs::msg::Odometry & odom,
   const nav_msgs::msg::Path & global_path,
@@ -166,28 +206,10 @@ geometry_msgs::msg::Twist UgvController::compute_command(
 {
   geometry_msgs::msg::Twist cmd;
 
+  // Defensive only. The node never calls this with an empty path (it guards on
+  // poses.empty() before dispatching), which is exactly why the recovery
+  // teardown for this case lives in on_path_cleared() below and not here.
   if (global_path.poses.empty()) {
-    // An empty path ends any recovery in progress, and says so. Two reasons.
-    //
-    // Pairing: this return sits ABOVE the recovery check below, so without
-    // this branch a recovery interrupted by the path going empty produces an
-    // entry line with no EXIT — indistinguishable in a grep from a recovery
-    // that never terminated, which is the one failure mode the entry/exit
-    // pairing check exists to detect. It would report a fault that did not
-    // happen and mask the one that did.
-    //
-    // Correctness: the path empties when the goal is cleared or replaced, and
-    // the recovery's backup distance and turn direction were both chosen for
-    // the obstacle blocking the OLD goal. Carrying that state into the next
-    // goal turns the robot toward a hazard nothing has re-measured.
-    if (recovery_active_) {
-      recovery_active_ = false;
-      fprintf(stderr,
-        "[ugv_ctrl] recovery EXIT: PATH CLEARED after %d ticks (goal withdrawn "
-        "or replaced mid-recovery)\n",
-        recovery_ticks_);
-      fflush(stderr);
-    }
     return cmd;
   }
 

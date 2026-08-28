@@ -20,6 +20,19 @@ public:
     const nav_msgs::msg::Odometry & odom,
     const nav_msgs::msg::Path & global_path,
     const MapSnapshot & map_snapshot) = 0;
+
+  /// Called on every tick where the global path is empty, i.e. the goal was
+  /// reached, cleared, or withdrawn.
+  ///
+  /// It exists because the node does not call compute_command() at all on an
+  /// empty path, so a controller cannot observe that transition from inside
+  /// compute_command() — a check there is unreachable code. Anything a
+  /// controller latched *for the goal that just went away* has to be dropped
+  /// here or it silently carries into the next goal.
+  ///
+  /// Called repeatedly while the path stays empty, so implementations must be
+  /// idempotent and must not log unconditionally.
+  virtual void on_path_cleared() {}
 };
 
 }  // namespace simple_nav_3d

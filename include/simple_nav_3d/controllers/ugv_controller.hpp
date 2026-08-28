@@ -20,6 +20,8 @@ public:
     const nav_msgs::msg::Path & global_path,
     const MapSnapshot & map_snapshot) override;
 
+  void on_path_cleared() override;
+
 private:
   // Deterministic 2-phase recovery: drive straight backwards into known
   // free space, then rotate 90 deg to break out of the dead end. Replaces
@@ -63,9 +65,14 @@ private:
   // A tick count is that bound and not a timestamp because the guard must not
   // depend on odom.header.stamp being populated — a zero stamp would make an
   // elapsed-time cap read 0 s forever and silently disable the very check
-  // that exists to stop a silent hang. Ticks are also the honest unit here:
-  // the node only calls into the controller when it has a fresh, non-empty
-  // path, so a suspended recovery should not age.
+  // that exists to stop a silent hang.
+  //
+  // This used to note that a suspended recovery "should not age", since the
+  // node only calls in on a fresh non-empty path. That reasoning was sound for
+  // the tick unit but wrong about suspension: a recovery is no longer allowed
+  // to survive an empty path at all (see on_path_cleared), so the only gaps a
+  // tick count can now skip are stale-odom and stale-path ticks, where the
+  // robot is not executing the recovery either.
   int recovery_ticks_{0};
 
 };

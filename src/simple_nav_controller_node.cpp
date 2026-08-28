@@ -102,6 +102,15 @@ private:
 
     geometry_msgs::msg::Twist cmd;
 
+    // Tell the controller the goal is gone. It cannot see this for itself:
+    // every path below either returns early or skips compute_command entirely
+    // when the path is empty, so a controller only ever observes non-empty
+    // paths and cannot drop state it latched for the goal that just ended.
+    // Placed above the rotate-to-goal branch because that branch returns.
+    if (latest_path_.poses.empty()) {
+      controller_->on_path_cleared();
+    }
+
     // Rotate-to-goal: path went empty (navigator cleared goal on position),
     // but we have a latched goal yaw. Rotate in place until aligned.
     if (!odom_stale && latest_path_.poses.empty() && has_pending_goal_yaw_) {
