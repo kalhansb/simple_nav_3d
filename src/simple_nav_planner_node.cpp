@@ -599,7 +599,14 @@ private:
       });
   }
 
-  void clear_plan_state(const char * reason)
+  /// `anomalous` picks the severity, and the distinction matters more than it
+  /// looks: the campaign log level for this node is WARN, so an INFO line here
+  /// is not written to the per-cell nav log at all. Clearing on "goal reached"
+  /// is routine and stays INFO. Clearing because the navigator stopped sending
+  /// goals is the robot silently coasting to a halt with an empty path, and at
+  /// INFO that produced a nav log with no entry for it whatsoever — the run
+  /// looked idle rather than broken.
+  void clear_plan_state(const char * reason, bool anomalous = false)
   {
     has_goal_ = false;
     has_prev_path_ = false;
@@ -615,7 +622,11 @@ private:
     empty.header.frame_id = latest_odom_.header.frame_id.empty() ? params_.odom_frame :
       latest_odom_.header.frame_id;
     path_pub_->publish(empty);
-    RCLCPP_INFO(get_logger(), "planner cleared active goal: %s", reason);
+    if (anomalous) {
+      RCLCPP_WARN(get_logger(), "planner cleared active goal: %s", reason);
+    } else {
+      RCLCPP_INFO(get_logger(), "planner cleared active goal: %s", reason);
+    }
   }
 
   /// End a starvation episode: report it if it ever got past the grace period,
@@ -623,8 +634,11 @@ private:
   void clear_starvation()
   {
     if (ticks_starved_ > kStarveGraceTicks) {
-      RCLCPP_INFO(liveness_logger_, "planner recovered: map arrived on '%s' after %.0f s",
-        input_map_topic_.c_str(), ticks_starved_ * 0.1);
+      // Names no specific input: starvation now covers a missing odom as well
+      // as a missing map, and a recovery line that always says "map" would be
+      // wrong for half the episodes it reports.
+      RCLCPP_INFO(liveness_logger_, "planner recovered: inputs arrived after %.0f s "
+        "(map topic '%s')", ticks_starved_ * 0.1, input_map_topic_.c_str());
     }
     ticks_starved_ = 0;
   }
@@ -651,25 +665,36 @@ private:
       // Grace period first: dscovox publishes nothing until its first fused
       // frame and only once a subscriber exists, so a few seconds of no map at
       // startup is expected and must not train anyone to ignore this.
-      if (has_goal_ && has_odom_ && !map_ready) {
+      // The condition is "a goal is pending and something needed to serve it is
+      // missing", not specifically the map. The map was the input that failed
+      // historically, but scoping the warning to it left the symmetric case —
+      // goal and map present, no ODOM — in exactly the silence this check
+      // exists to end: an odom remap regression produces a nav log with two
+      // startup banners and nothing after, while the exploration planner times
+      // every goal out and the run reads as difficult terrain.
+      //
+      // `has_goal_` still gates it. A planner with no goal is idle by design
+      // between explore steps, and warning on that would fire on every healthy
+      // run until nobody read the line.
+      if (has_goal_ && (!has_odom_ || !map_ready)) {
         ++ticks_starved_;
         if (ticks_starved_ > kStarveGraceTicks) {
           RCLCPP_WARN_THROTTLE(liveness_logger_, *get_clock(), 10000,
-            "planner starving: goal and odom present but no map on '%s' after "
-            "%.0f s — check that topic has a publisher; this planner is a no-op "
-            "until it does",
-            input_map_topic_.c_str(), ticks_starved_ * 0.1);
+            "planner starving: goal pending but odom=%d map=%d after %.0f s "
+            "— map topic '%s'; check the missing input has a publisher; this "
+            "planner is a no-op until it arrives",
+            static_cast<int>(has_odom_), static_cast<int>(map_ready),
+            ticks_starved_ * 0.1, input_map_topic_.c_str());
         }
-      } else if (map_ready) {
-        // Still waiting, but not on the map — the goal or the odom is what is
-        // missing. Clear the starvation state here rather than leaving it to
-        // the full-readiness path below, which is only reached once all three
-        // are present. Without this, a starvation that ends because the GOAL
-        // was cleared keeps its counter, and the next tick that has everything
-        // prints "map arrived after N s" — attributing a goal gap to a map
-        // recovery, and inflating N by however long the planner sat idle. A
-        // liveness line that reports the wrong cause is worse than none: it is
-        // how these checks stop being read.
+      } else {
+        // No goal pending: idle by design, not starving. Clear the state here
+        // rather than leaving it to the full-readiness path below, which is
+        // only reached once all three inputs are present. Without this, a
+        // starvation that ends because the GOAL was withdrawn keeps its
+        // counter, and the next fully-ready tick prints a recovery line
+        // inflated by however long the planner sat idle — attributing a goal
+        // gap to an input recovery. A liveness line that reports the wrong
+        // cause is worse than none: it is how these checks stop being read.
         clear_starvation();
       }
       return;
@@ -682,7 +707,7 @@ private:
     constexpr int kGoalStaleTicks = 100;
     ++ticks_since_goal_msg_;
     if (ticks_since_goal_msg_ > kGoalStaleTicks) {
-      clear_plan_state("navigator stopped publishing");
+      clear_plan_state("navigator stopped publishing", /*anomalous=*/true);
       return;
     }
 

@@ -167,6 +167,27 @@ geometry_msgs::msg::Twist UgvController::compute_command(
   geometry_msgs::msg::Twist cmd;
 
   if (global_path.poses.empty()) {
+    // An empty path ends any recovery in progress, and says so. Two reasons.
+    //
+    // Pairing: this return sits ABOVE the recovery check below, so without
+    // this branch a recovery interrupted by the path going empty produces an
+    // entry line with no EXIT — indistinguishable in a grep from a recovery
+    // that never terminated, which is the one failure mode the entry/exit
+    // pairing check exists to detect. It would report a fault that did not
+    // happen and mask the one that did.
+    //
+    // Correctness: the path empties when the goal is cleared or replaced, and
+    // the recovery's backup distance and turn direction were both chosen for
+    // the obstacle blocking the OLD goal. Carrying that state into the next
+    // goal turns the robot toward a hazard nothing has re-measured.
+    if (recovery_active_) {
+      recovery_active_ = false;
+      fprintf(stderr,
+        "[ugv_ctrl] recovery EXIT: PATH CLEARED after %d ticks (goal withdrawn "
+        "or replaced mid-recovery)\n",
+        recovery_ticks_);
+      fflush(stderr);
+    }
     return cmd;
   }
 
