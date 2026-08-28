@@ -140,11 +140,11 @@ def launch_setup(context):
     # two are meant to be comparable cell-for-cell, and the planner ROI is
     # sized against this side length.
     #
-    # NOTE the topic: ~/global_planning_map, never ~/planning_map. The nav
-    # global planner below already subscribes to
-    # /<robot>/dscovox_node/planning_map, a topic that has never had a
-    # publisher. Reusing that name would silently activate it as a second,
-    # uncontrolled behavioural change.
+    # NOTE the topic: ~/global_planning_map, never ~/planning_map. Both the
+    # exploration planner and — since the generation-5 fix — the nav global
+    # planner subscribe to this name. ~/planning_map means the 20 m rolling
+    # crop from scovox_node, which the LOCAL nav planner consumes; the two are
+    # different maps with different jobs and must keep different names.
     dscovox_global_plan_params = {}
     if plan_glob_size > 0.0:
         dscovox_global_plan_params = {
@@ -257,7 +257,17 @@ def launch_setup(context):
             "ugv.goal_yaw_tol_rad": 0.2,
             "ugv.heading_kp": 1.5,
             "ugv.linear_kp": 0.8,
-            "ugv.avoidance_hard_stop_distance_m": 0.15,
+            # Generation 5: raised 0.15 -> 0.4. At 0.15 the recovery state
+            # machine was unreachable — it did not fire once in 72 campaign
+            # robot-runs, including runs where a robot sat immobilised for ten
+            # minutes, because the slowdown scaling above it
+            #   scale = (clearance - hard_stop) / (slowdown - hard_stop)
+            # drives commanded speed to zero as clearance approaches the
+            # threshold, so the robot creeps to a halt just outside it and the
+            # trigger is never crossed. 0.4 sits inside the band the robot can
+            # still reach under power. It must stay strictly below
+            # avoidance_slowdown_distance_m or the span goes non-positive.
+            "ugv.avoidance_hard_stop_distance_m": 0.4,
             "ugv.avoidance_slowdown_distance_m": 0.8,
             "ugv.avoidance_max_range_m": 3.0,
             "ugv.avoidance_arc_half_angle_deg": 45.0,
@@ -400,23 +410,14 @@ def launch_setup(context):
                 # burst is discarded at whichever end is shallower.
                 "scovox_bin_qos_depth": 4000,
                 **dscovox_global_plan_params,
-                # NOTE: the planning_map_* block below is an undeclared no-op in
-                # dscovox_node — it has never had a ~/planning_map publisher.
-                # Kept as-is rather than removed, because the nav global planner
-                # subscribes to that topic and making it real is a separate,
-                # deliberate decision (see the dscovox_global_plan_params note).
-                "publish_planning_map": True,
-                "planning_map_topic": "~/planning_map",
-                "planning_map_resolution": 0.20,
-                # 60x60 m exploration ROI centred on the world origin. Must
-                # match the eig_exploration_planner roi_* params so the
-                # global planner is constrained to the same area.
-                "planning_map_size_m": 60.0,
-                "planning_map_origin_x": -30.0,
-                "planning_map_origin_y": -30.0,
-                "planning_map_min_z": 0.05,
-                "planning_map_max_z": 1.0,
-                "planning_map_inflation_m": 1.5,
+                # REMOVED: a planning_map_* block used to be passed here. Every
+                # key in it was undeclared in dscovox_node, so ROS accepted the
+                # values and nothing read them, while the nav global planner
+                # subscribed to the ~/planning_map topic they described. Those
+                # parameters made a dead topic look configured — the single
+                # most misleading thing in this launch file. The global planner
+                # now subscribes to dscovox's real ~/global_planning_map, whose
+                # geometry comes from dscovox_global_plan_params above.
             }],
         ))
 
@@ -497,8 +498,7 @@ def launch_setup(context):
         ))
 
         # Per-robot merger, identical to the "dscovox" one (sensor-agnostic —
-        # it fuses ScovoxMapBinary streams). The planning_map_* params the
-        # rgbd block passes are undeclared no-ops in dscovox_node, dropped here.
+        # it fuses ScovoxMapBinary streams).
         dscovox_inputs = dscovox_input_topics()
         nodes.append(Node(
             package="scovox_mapping",
@@ -555,13 +555,24 @@ def launch_setup(context):
     ))
 
     # ── Global planner ────────────────────────────────────────────────
-    # In dscovox mode the global planner reads dscovox's merged planning_map
+    # In dscovox mode the global planner reads dscovox's merged planning map
     # directly (no costmap forwarding). For UAV it uses the 3D GetRegion
     # service instead of a 2D map. In other modes it falls back to the
     # costmap-built global map via topics.planning_map default.
+    #
+    # The map is ~/global_planning_map, NOT ~/planning_map. dscovox publishes
+    # two grids and only the former is usable for global planning: the latter
+    # is body-centred, so its origin moves with the robot and a plan is stale
+    # the moment the robot drives. Pointing this node at ~/planning_map was a
+    # silent no-op — nothing has ever published that name — and it left the
+    # global planner inert for the whole campaign history while the local
+    # planner drove alone on a 20 m horizon. That is the direct cause of the
+    # local-minimum traps in sections 28 and 32.9. See the starvation warning
+    # in simple_nav_planner_node.cpp, which now makes the same mistake loud.
     global_planner_extra = {"pipeline.role": "global"}
     if mapping in ("dscovox", "dscovox_lidar"):
-        global_planner_extra["topics.planning_map"] = f"/{robot}/dscovox_node/planning_map"
+        global_planner_extra["topics.planning_map"] = (
+            f"/{robot}/dscovox_node/global_planning_map")
         if is_uav:
             global_planner_extra["scovox_get_region_service"] = f"/{robot}/dscovox_node/get_region"
 
@@ -571,7 +582,11 @@ def launch_setup(context):
         namespace=robot,
         name="simple_nav_global_planner",
         output="screen",
-        arguments=["--ros-args", "--log-level", "simple_nav_global_planner:=warn"],
+        # Logger names are namespaced, so the selector must carry the robot
+        # prefix. Without it the selector matches nothing and the level is
+        # silently ignored — which is why this node's INFO lines appeared in
+        # the campaign nav logs despite the "warn" here.
+        arguments=["--ros-args", "--log-level", f"{robot}.simple_nav_global_planner:=warn"],
         parameters=[nav_params, global_planner_extra],
     ))
 
@@ -598,7 +613,10 @@ def launch_setup(context):
             namespace=robot,
             name="simple_nav_local_planner",
             output="screen",
-            arguments=["--ros-args", "--log-level", "simple_nav_local_planner:=warn"],
+            # Robot-prefixed, same reason as the global planner above: an
+            # unprefixed selector matches no logger and is silently ignored, so
+            # this node has been running at INFO all along despite saying warn.
+            arguments=["--ros-args", "--log-level", f"{robot}.simple_nav_local_planner:=warn"],
             parameters=[nav_params, local_planner_extra],
         ))
 
@@ -619,7 +637,10 @@ def launch_setup(context):
         namespace=robot,
         name="simple_nav_controller",
         output="screen",
-        arguments=["--ros-args", "--log-level", "simple_nav_controller:=warn"],
+        # Robot-prefixed (see the planners above). The controller's recovery
+        # ENTRY/EXIT lines are fprintf to stderr, not rclcpp logging, so they
+        # are unaffected by this level and stay greppable in the nav logs.
+        arguments=["--ros-args", "--log-level", f"{robot}.simple_nav_controller:=warn"],
         parameters=[nav_params, controller_extra],
     ))
 

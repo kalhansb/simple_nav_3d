@@ -408,12 +408,15 @@ public:
     planner_ = create_planner(params_.planner, params_);
     is_uav_ = (params_.mode == "uav");
     is_local_role_ = (params_.pipeline_role == "local");
+    liveness_logger_ = rclcpp::get_logger(
+      params_.robot_name.empty() ? "nav_liveness" : params_.robot_name + ".nav_liveness");
 
     // Role-based input/output topic selection. The planner code itself is
     // role-agnostic — only the I/O wiring differs between global and local
     // instances.
     const std::string input_map_topic =
       is_local_role_ ? params_.local_planning_map_topic : params_.planning_map_topic;
+    input_map_topic_ = input_map_topic;
     const std::string output_path_topic =
       is_local_role_ ? params_.local_path_topic : params_.global_path_topic;
     if (is_local_role_ && input_map_topic.empty()) {
@@ -474,6 +477,17 @@ public:
             last_flip_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
             prev_path_.poses.clear();
             prev_full_path_.poses.clear();
+            // Drop the global path too. It was planned to the OLD goal, and
+            // the global planner publishes nothing when it fails to plan — so
+            // without this the local planner would keep masking its A* into a
+            // corridor around a route to a goal we have already left. That
+            // silently biases every local plan toward the wrong homotopy for
+            // as long as global keeps failing.
+            has_global_path_ = false;
+            latest_global_path_.poses.clear();
+            // A new goal must be planned on the very next tick, not whenever
+            // the replan period happens to expire.
+            force_replan_ = true;
             RCLCPP_INFO(
               get_logger(),
               "Goal changed (delta=%.2f m), resetting plan acceptance cache",
@@ -503,14 +517,26 @@ public:
       RCLCPP_INFO(get_logger(), "UAV 3D planner: scovox service=%s", scovox_service.c_str());
     }
 
+    // On liveness_logger_, NOT get_logger(). The launch file sets this node's
+    // own logger to warn, so on get_logger() this banner is invisible in every
+    // campaign log — and it is the only line that says which map topic the
+    // planner is watching. That is precisely how a global planner pointed at a
+    // topic nobody publishes went unnoticed for the whole campaign history.
+    // liveness_logger_ is a separate logger name and is deliberately not
+    // covered by the per-node selectors, so this line and the periodic
+    // "global plan ok" heartbeat always survive together: one says what was
+    // wired, the other proves it produced work.
     RCLCPP_INFO(
-      get_logger(),
-      "planner node started: role=%s active_goal=%s in_map=%s out_path=%s planner=%s",
+      liveness_logger_,
+      "planner node started: role=%s active_goal=%s in_map=%s out_path=%s "
+      "planner=%s corridor=%.1fm — NO-OP until '%s' has a publisher",
       params_.pipeline_role.c_str(),
       params_.active_goal_topic.c_str(),
       input_map_topic.c_str(),
       output_path_topic.c_str(),
-      planner_->name().c_str());
+      planner_->name().c_str(),
+      is_local_role_ ? params_.ugv_local_corridor_radius_m : 0.0,
+      input_map_topic.c_str());
   }
 
 private:
@@ -592,6 +618,17 @@ private:
     RCLCPP_INFO(get_logger(), "planner cleared active goal: %s", reason);
   }
 
+  /// End a starvation episode: report it if it ever got past the grace period,
+  /// then reset. Idempotent, so it is safe to call on every non-starving tick.
+  void clear_starvation()
+  {
+    if (ticks_starved_ > kStarveGraceTicks) {
+      RCLCPP_INFO(liveness_logger_, "planner recovered: map arrived on '%s' after %.0f s",
+        input_map_topic_.c_str(), ticks_starved_ * 0.1);
+    }
+    ticks_starved_ = 0;
+  }
+
   void on_tick()
   {
     constexpr double kReplanHorizonM = 10.0;
@@ -603,8 +640,41 @@ private:
       RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000,
         "Planner waiting: goal=%d odom=%d map=%d",
         has_goal_, has_odom_, map_ready);
+
+      // Starvation is the one waiting-state that is never normal. A planner
+      // with a goal and a pose but no map has been asked to work and cannot,
+      // and if its map topic has no publisher it will wait forever — silently,
+      // because the line above is DEBUG and campaign logs run at WARN. That is
+      // exactly how this node stayed inert across every run of the project
+      // while still printing a healthy startup banner.
+      //
+      // Grace period first: dscovox publishes nothing until its first fused
+      // frame and only once a subscriber exists, so a few seconds of no map at
+      // startup is expected and must not train anyone to ignore this.
+      if (has_goal_ && has_odom_ && !map_ready) {
+        ++ticks_starved_;
+        if (ticks_starved_ > kStarveGraceTicks) {
+          RCLCPP_WARN_THROTTLE(liveness_logger_, *get_clock(), 10000,
+            "planner starving: goal and odom present but no map on '%s' after "
+            "%.0f s — check that topic has a publisher; this planner is a no-op "
+            "until it does",
+            input_map_topic_.c_str(), ticks_starved_ * 0.1);
+        }
+      } else if (map_ready) {
+        // Still waiting, but not on the map — the goal or the odom is what is
+        // missing. Clear the starvation state here rather than leaving it to
+        // the full-readiness path below, which is only reached once all three
+        // are present. Without this, a starvation that ends because the GOAL
+        // was cleared keeps its counter, and the next tick that has everything
+        // prints "map arrived after N s" — attributing a goal gap to a map
+        // recovery, and inflating N by however long the planner sat idle. A
+        // liveness line that reports the wrong cause is worse than none: it is
+        // how these checks stop being read.
+        clear_starvation();
+      }
       return;
     }
+    clear_starvation();
 
     // Detect navigator stopped publishing (crash, cancel, etc.).
     // Uses tick count instead of sim-time to avoid false triggers from sim-time jumps.
@@ -622,6 +692,43 @@ private:
     if (goal_dist_m <= final_goal_tolerance(params_)) {
       clear_plan_state("goal reached");
       return;
+    }
+
+    // Global-role replan decimation.
+    //
+    // The global instance plans A* over the 150 m fused grid (375x375 cells at
+    // 0.40 m). Its input map only changes at 1 Hz — dscovox republishes
+    // global_planning_map on a 1.0 s timer — so planning at the 10 Hz tick rate
+    // recomputes the same answer nine times out of ten, on the biggest grid in
+    // the system, for both robots, inside a cell budget that is already
+    // 1.149 x sim-time.
+    //
+    // The gate is stamped on every ATTEMPT, not on every success. A failing
+    // plan publishes nothing and leaves has_prev_path_ false, so a
+    // success-stamped gate would degenerate to full tick rate in exactly the
+    // case that costs the most: a blocked goal cell makes best_goal_endpoint_cell
+    // run its full relaxation scan before giving up.
+    //
+    // Two things still preempt the period: a goal change (force_replan_), and a
+    // latched path that the newest map has just invalidated — deferring either
+    // would mean steering along a route we already know is wrong.
+    const bool is_global_ugv = !is_uav_ && !is_local_role_;
+    if (is_global_ugv && params_.ugv_global_replan_period_sec > 0.0) {
+      const double since_attempt =
+        has_plan_attempt_ ? (now() - last_plan_attempt_).seconds()
+                          : std::numeric_limits<double>::infinity();
+      bool skip = !force_replan_ &&
+        since_attempt >= 0.0 &&
+        since_attempt < params_.ugv_global_replan_period_sec;
+      if (skip && has_prev_path_ && !path_still_valid(prev_full_path_, latest_map_)) {
+        skip = false;
+      }
+      if (skip) {
+        return;
+      }
+      force_replan_ = false;
+      last_plan_attempt_ = now();
+      has_plan_attempt_ = true;
     }
 
     const MapSnapshot map_snapshot = snapshot_from_occupancy_grid(latest_map_);
@@ -726,6 +833,20 @@ private:
       prev_full_path_ = out.path;
       has_prev_path_ = true;
       path_pub_->publish(out.path);
+
+      // Positive heartbeat for the global instance. The whole failure this
+      // release fixes was a planner that looked healthy because it only ever
+      // printed a startup banner: absence of output was indistinguishable from
+      // absence of work. A periodic line that can ONLY be printed after a real
+      // plan makes "global planner is alive" checkable from the campaign logs
+      // instead of inferable from silence.
+      if (is_global_ugv) {
+        RCLCPP_INFO_THROTTLE(liveness_logger_, *get_clock(), 30000,
+          "global plan ok: wps=%zu len=%.1fm goal=(%.1f,%.1f) map=%ux%u@%.2fm",
+          out.path.poses.size(), path_length(out.path), goal.x, goal.y,
+          latest_map_.info.width, latest_map_.info.height,
+          latest_map_.info.resolution);
+      }
     } else if (has_prev_path_ && (is_uav_ || path_still_valid(prev_full_path_, latest_map_))) {
       // Re-stamp orientation on reused path if last waypoint is near goal.
       if (!prev_full_path_.poses.empty()) {
@@ -779,6 +900,37 @@ private:
   bool has_global_path_{false};
   nav_msgs::msg::Path latest_global_path_;
   int ticks_since_goal_msg_{0};
+
+  // Starvation watch: consecutive 100 ms ticks spent with a goal and a pose
+  // but no map. 200 ticks = 20 s of grace before the first warning.
+  std::string input_map_topic_;
+  int ticks_starved_{0};
+  static constexpr int kStarveGraceTicks = 200;
+
+  // Liveness lines go to a SEPARATE logger, and that is not cosmetic.
+  //
+  // The launch file runs this node at `<robot>.simple_nav_global_planner:=warn`
+  // — deliberately, because the planner's INFO chatter is per-replan. But the
+  // positive half of the "did the global planner ever plan?" gate is an INFO
+  // heartbeat, and a heartbeat that the log level eats is a check that has
+  // stopped checking: it reads as PASS whether or not the planner works. That
+  // is the same class of defect as the topic bug it exists to catch.
+  //
+  // Escalating it to WARN would work but poisons the WARN stream that the
+  // campaign failure counts are read from. `<robot>.nav_liveness` sits outside
+  // the `<robot>.simple_nav_global_planner` subtree the selector names, so it
+  // keeps the default level and the line survives at its honest severity.
+  rclcpp::Logger liveness_logger_{rclcpp::get_logger("nav_liveness")};
+
+  // Replan decimation. Timestamped on every ATTEMPT, not on every success:
+  // a planner that is failing must be rate-limited too, and failure publishes
+  // nothing, so gating on a stored path would leave the failing case running
+  // at the full 10 Hz tick rate — the one case where each attempt is most
+  // expensive, because a blocked goal cell triggers the full endpoint
+  // relaxation scan.
+  rclcpp::Time last_plan_attempt_{0, 0, RCL_ROS_TIME};
+  bool has_plan_attempt_{false};
+  bool force_replan_{false};
   bool has_prev_path_{false};
   int prev_side_{0};
   double prev_cost_m_{0.0};

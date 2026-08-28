@@ -100,6 +100,20 @@ install(FILES README.md
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  # No if(TARGET ...) guard, deliberately, and matching explo_planner's
+  # CMakeLists. ament_add_gtest skips target creation when gtest is missing,
+  # so the guard turned "the test suite was never built" into a clean build
+  # with zero tests — the failure mode is a green result that checked nothing.
+  # Unguarded, the same situation is a hard CMake error naming the target.
+  ament_add_gtest(test_ugv_planner test/test_ugv_planner.cpp)
+  target_link_libraries(test_ugv_planner simple_nav_3d_core)
+  ament_target_dependencies(test_ugv_planner
+    rclcpp
+    geometry_msgs
+    nav_msgs
+  )
 endif()
 
 ament_export_include_directories(include)

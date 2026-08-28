@@ -157,6 +157,12 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
     "ugv.replan_cost_threshold_m", 0.0);
   p.ugv_side_flip_cooldown_sec = node.declare_parameter<double>(
     "ugv.side_flip_cooldown_sec", 3.0);
+  // Minimum seconds between global-role A* attempts. 0 disables decimation and
+  // restores planning on every 100 ms tick. Matched to dscovox's 1.0 s
+  // global_planning_map republish period — a shorter value cannot see newer
+  // data, it can only spend more CPU on the same map.
+  p.ugv_global_replan_period_sec = node.declare_parameter<double>(
+    "ugv.global_replan_period_sec", 1.0);
   p.ugv_local_corridor_radius_m = node.declare_parameter<double>(
     "ugv.local_corridor_radius_m", 2.0);
   p.ugv_global_map_min_hits = node.declare_parameter<int>(
@@ -246,6 +252,9 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   }
   if (p.ugv_local_corridor_radius_m < 0.0) {
     throw std::runtime_error("ugv.local_corridor_radius_m must be >= 0");
+  }
+  if (p.ugv_global_replan_period_sec < 0.0) {
+    throw std::runtime_error("ugv.global_replan_period_sec must be >= 0");
   }
   if (p.ugv_global_map_min_hits < 1) {
     throw std::runtime_error("ugv.global_map_min_hits must be >= 1");

@@ -229,6 +229,20 @@ geometry_msgs::msg::Twist UgvController::compute_command(
     cmd.linear.x *= turn_scale;
   }
 
+  // What the controller wanted before avoidance scaling. Diagnostic only — it
+  // is logged at recovery entry so a reader can tell a robot that was trying to
+  // drive from one that had already been scaled to a standstill.
+  const double desired_linear = cmd.linear.x;
+
+  // Recovery owns the command stream until both phases complete. Checked here,
+  // ahead of the front-arc scan, because the scan's no-obstacle early return
+  // below would otherwise drop out of an in-progress recovery: a robot that has
+  // just backed away from the obstacle that triggered recovery often sees a
+  // clear arc, which used to abandon the sequence before the turn ever ran.
+  if (recovery_active_) {
+    return compute_recovery_command(odom, map_snapshot);
+  }
+
   const double half_angle_rad = params_.ugv_avoidance_arc_half_angle_deg * M_PI / 180.0;
   const double half_body_length = 0.5 * params_.robot_body_length_m;
   const double half_body_width = 0.5 * params_.robot_body_width_m;
@@ -241,6 +255,7 @@ geometry_msgs::msg::Twist UgvController::compute_command(
     half_angle_rad);
 
   if (!std::isfinite(stats.min_clearance)) {
+    // Nothing in the front arc: no obstacle to recover from.
     return cmd;
   }
 
@@ -259,45 +274,64 @@ geometry_msgs::msg::Twist UgvController::compute_command(
     cmd.linear.x *= std::clamp(scale, 0.0, 1.0);
   }
 
-  // If we're already in recovery, the state machine owns the command stream
-  // until both phases complete (recovery_active_ is cleared inside
-  // compute_recovery_command). Don't re-enter or short-circuit on clearance.
-  if (recovery_active_) {
-    return compute_recovery_command(odom, map_snapshot);
-  }
-
+  // The proximity trigger. It did not fire once in 72 campaign robot-runs at
+  // the old 0.15 m threshold, including runs where a robot sat immobilised for
+  // ten minutes, because the slowdown scaling immediately above decays the
+  // commanded speed toward zero *before* clearance reaches the threshold: the
+  // robot asymptotes into a creep and never crosses it. Generation 5 raises
+  // ugv.avoidance_hard_stop_distance_m to 0.4 m so the trigger sits inside the
+  // band the robot can actually reach while still commanding motion.
+  //
+  // The cost is that it will also fire on genuinely tight-but-passable gaps.
+  // That is a known and accepted trade, not an oversight — an unreachable
+  // recovery is worth less than one that occasionally fires early, and the
+  // pilot gate measures the entry rate per robot-run before any full campaign
+  // commits to it.
   if (clearance < params_.ugv_avoidance_hard_stop_distance_m) {
-    // Initialise the recovery state machine. Pick the turn direction here
-    // (left vs right, by side clearance) so the whole sequence is committed
-    // upfront and not re-decided every tick.
-    const double cx = odom.pose.pose.position.x;
-    const double cy = odom.pose.pose.position.y;
-    const double cyaw = yaw_from_quaternion(odom.pose.pose.orientation);
-
-    constexpr double kSideArcHalfAngle = M_PI / 4.0;  // 45 deg arc
-    const double left_clr = compute_arc_clearance(
-      map_snapshot, odom, half_body_length, half_body_width,
-      params_.ugv_avoidance_max_range_m, M_PI / 2.0, kSideArcHalfAngle);
-    const double right_clr = compute_arc_clearance(
-      map_snapshot, odom, half_body_length, half_body_width,
-      params_.ugv_avoidance_max_range_m, -M_PI / 2.0, kSideArcHalfAngle);
-    const int sign = (left_clr >= right_clr) ? +1 : -1;
-
-    recovery_active_ = true;
-    recovery_phase_ = RecoveryPhase::BACKUP;
-    recovery_start_x_ = cx;
-    recovery_start_y_ = cy;
-    recovery_target_yaw_ = normalize_angle(cyaw + sign * (M_PI / 2.0));
-
-    fprintf(stderr,
-      "[ugv_ctrl] HARD STOP -> recovery: clearance=%.2f, "
-      "left_clr=%.2f right_clr=%.2f, will backup then turn %s 90deg\n",
-      clearance, left_clr, right_clr, (sign > 0 ? "LEFT" : "RIGHT"));
-
-    return compute_recovery_command(odom, map_snapshot);
+    return enter_recovery(odom, map_snapshot, "HARD STOP", desired_linear, clearance);
   }
 
   return cmd;
+}
+
+// Commits the whole recovery sequence upfront: turn direction is picked once
+// here from side clearance, not re-decided every tick.
+geometry_msgs::msg::Twist UgvController::enter_recovery(
+  const nav_msgs::msg::Odometry & odom,
+  const MapSnapshot & map_snapshot,
+  const char * trigger,
+  double desired_linear,
+  double clearance)
+{
+  const double cx = odom.pose.pose.position.x;
+  const double cy = odom.pose.pose.position.y;
+  const double cyaw = yaw_from_quaternion(odom.pose.pose.orientation);
+  const double half_body_length = 0.5 * params_.robot_body_length_m;
+  const double half_body_width = 0.5 * params_.robot_body_width_m;
+
+  constexpr double kSideArcHalfAngle = M_PI / 4.0;  // 45 deg arc
+  const double left_clr = compute_arc_clearance(
+    map_snapshot, odom, half_body_length, half_body_width,
+    params_.ugv_avoidance_max_range_m, M_PI / 2.0, kSideArcHalfAngle);
+  const double right_clr = compute_arc_clearance(
+    map_snapshot, odom, half_body_length, half_body_width,
+    params_.ugv_avoidance_max_range_m, -M_PI / 2.0, kSideArcHalfAngle);
+  const int sign = (left_clr >= right_clr) ? +1 : -1;
+
+  recovery_active_ = true;
+  recovery_phase_ = RecoveryPhase::BACKUP;
+  recovery_start_x_ = cx;
+  recovery_start_y_ = cy;
+  recovery_target_yaw_ = normalize_angle(cyaw + sign * (M_PI / 2.0));
+  recovery_ticks_ = 0;
+
+  fprintf(stderr,
+    "[ugv_ctrl] %s -> recovery: clearance=%.2f want_v=%.3f at (%.2f, %.2f), "
+    "left_clr=%.2f right_clr=%.2f, will backup then turn %s 90deg\n",
+    trigger, clearance, desired_linear, cx, cy,
+    left_clr, right_clr, (sign > 0 ? "LEFT" : "RIGHT"));
+
+  return compute_recovery_command(odom, map_snapshot);
 }
 
 // Two-phase deterministic recovery:
@@ -321,11 +355,34 @@ geometry_msgs::msg::Twist UgvController::compute_recovery_command(
   constexpr double kTurnTolerance = 0.10;     // rad (~5.7 deg)
   constexpr double kTurnSpeed = 0.6;          // rad/s
 
+  // Hard bound on the whole sequence. The node ticks at 20 Hz, so 400 ticks is
+  // 20 s of executed recovery. Nominal cost is ~160 ticks (0.8 m at 0.15 m/s
+  // then 90 deg at 0.6 rad/s), so this is ~2.5x the honest budget and only a
+  // robot that is not completing either phase can reach it.
+  constexpr int kRecoveryMaxTicks = 400;
+
   const double cx = odom.pose.pose.position.x;
   const double cy = odom.pose.pose.position.y;
   const double cyaw = yaw_from_quaternion(odom.pose.pose.orientation);
   const double half_body_length = 0.5 * params_.robot_body_length_m;
   const double half_body_width = 0.5 * params_.robot_body_width_m;
+
+  if (++recovery_ticks_ > kRecoveryMaxTicks) {
+    // Abandon rather than hang. Handing the robot back to normal control does
+    // not pretend the obstacle is gone: if it is still inside the hard-stop
+    // range the next tick re-enters recovery, which is a bounded, logged,
+    // observable cycle instead of a silent permanent reverse. The escalation
+    // beyond that belongs to the exploration planner, which times the goal out
+    // on nav_max_timeout_sec and blacklists it.
+    fprintf(stderr,
+      "[ugv_ctrl] recovery EXIT: TIMEOUT after %d ticks in %s at (%.2f, %.2f) "
+      "— abandoning recovery, returning to normal control\n",
+      recovery_ticks_ - 1,
+      (recovery_phase_ == RecoveryPhase::BACKUP ? "BACKUP" : "TURN"), cx, cy);
+    recovery_phase_ = RecoveryPhase::DONE;
+    recovery_active_ = false;
+    return cmd;
+  }
 
   if (recovery_phase_ == RecoveryPhase::BACKUP) {
     const double dx = cx - recovery_start_x_;
@@ -357,9 +414,12 @@ geometry_msgs::msg::Twist UgvController::compute_recovery_command(
   if (recovery_phase_ == RecoveryPhase::TURN) {
     const double yaw_err = normalize_angle(recovery_target_yaw_ - cyaw);
     if (std::abs(yaw_err) < kTurnTolerance) {
+      // Shares the "recovery EXIT" token with the timeout branch on purpose:
+      // one grep pairs every entry against an exit, so a non-terminating
+      // recovery shows up as a count mismatch instead of as silence.
       fprintf(stderr,
-        "[ugv_ctrl] recovery TURN complete: yaw_err=%.2f rad, exiting recovery\n",
-        yaw_err);
+        "[ugv_ctrl] recovery EXIT: TURN complete, yaw_err=%.2f rad after %d ticks\n",
+        yaw_err, recovery_ticks_);
       recovery_phase_ = RecoveryPhase::DONE;
       recovery_active_ = false;
       return cmd;  // zero cmd this tick, normal control next tick

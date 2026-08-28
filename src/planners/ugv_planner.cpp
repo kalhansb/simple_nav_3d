@@ -312,6 +312,23 @@ std::optional<GridIndex> best_goal_endpoint_cell(
   const double min_progress_cells =
     (start_to_goal_cells > 6.0) ? std::max(3.0, 0.2 * start_to_goal_cells) : 0.0;
 
+  // Fast path: the requested goal cell is itself free and reachable.
+  //
+  // This is provably the same answer the scan below would produce. The scan
+  // minimises heuristic(c, goal_raw), and the goal cell scores 0 — no other
+  // cell can beat it. It clears clear_toward_goal() trivially (zero-length
+  // ray), and it clears the min-progress filter by construction: that filter
+  // is either 0, or max(3, 0.2*d) with d > 6, and the goal cell's distance
+  // from the start IS d.
+  //
+  // Worth a special case only because of what it skips. The scan is a full
+  // width*height sweep running a Bresenham ray per candidate cell; on the
+  // 375x375 global grid that is on the order of 1e7 cell visits, every replan,
+  // for the common case where the goal is plainly reachable.
+  if (occupied[flatten(goal_raw, width)] == 0 && reachable[flatten(goal_raw, width)] != 0) {
+    return goal_raw;
+  }
+
   // Prefer the closest free cell to requested goal that has a clear corridor toward it.
   std::optional<GridIndex> best;
   double best_dist = std::numeric_limits<double>::infinity();

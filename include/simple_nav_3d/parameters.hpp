@@ -81,6 +81,7 @@ struct NodeParameters
   double ugv_global_map_origin_y_m;
   double ugv_replan_cost_threshold_m;
   double ugv_side_flip_cooldown_sec;
+  double ugv_global_replan_period_sec;
   // Half-width of the corridor the local planner builds around the global
   // path. Cells outside the corridor are masked off so the local planner
   // refines within global's chosen homotopy. Used only when role==local and
