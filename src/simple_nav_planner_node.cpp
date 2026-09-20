@@ -844,10 +844,63 @@ private:
       prev_cost_m_ = cost_m;
       prev_path_size_ = plan_horizon.poses.size();
       prev_path_ = plan_horizon;
+      // D2. Close the quantisation gap between the A* endpoint and the goal,
+      // then stamp the goal orientation onto whatever waypoint ends up last.
+      //
+      // Four roundings stack up between the planner's goal and where the robot
+      // physically stops: the global A* endpoint snaps to a 0.40 m cell centre,
+      // that endpoint becomes the local target, the local A* snaps it again to a
+      // 0.20 m cell centre, and the controller stops within its waypoint
+      // tolerance of that. None of those steps is wrong on its own and none is
+      // worth removing, but they compose: the median arrival across the campaign
+      // parked 0.269 m from the commanded point. The planner upstream then
+      // measures its own arrival against goal_xy_tolerance and is entitled to
+      // call a stop short of that a failure -- and failGoal() blacklists the
+      // position the robot is standing on, so the cost of a 27 cm shortfall is
+      // not a retry, it is a poisoned cell.
+      //
+      // The fix is to put the real goal back on the end of the path when it is
+      // close enough that the gap is quantisation rather than a genuine
+      // truncation, and only when the straight run to it is clear. The three
+      // guards are all load-bearing:
+      //   - !is_uav_: segment_free is a 2D test and would silently ignore z.
+      //     The UAV planner keeps the behaviour it has today.
+      //   - dg > kGoalSnapEpsM: A* already landed on the goal; appending a
+      //     duplicate point would give the controller a zero-length final
+      //     segment to compute a heading from.
+      //   - dg <= kGoalSnapMaxM: past this the shortfall is not rounding. It
+      //     means A* could not reach the goal (blocked cell, corridor mask, map
+      //     edge) and extending the path would be inventing a route through
+      //     terrain nothing has searched.
+      // The snapshot used is the UNMASKED map_snapshot, never map_for_planner:
+      // the corridor mask marks everything outside the corridor occupied, so
+      // testing against it would refuse appends purely for being off-centreline.
+      constexpr double kGoalSnapMaxM = 0.6;
+      constexpr double kGoalSnapEpsM = 1e-3;
+      if (!out.path.poses.empty() && !is_uav_) {
+        const auto & wp = out.path.poses.back().pose.position;
+        const double dg = std::hypot(wp.x - goal.x, wp.y - goal.y);
+        if (dg > kGoalSnapEpsM && dg <= kGoalSnapMaxM) {
+          if (segment_free(map_snapshot, wp.x, wp.y, goal.x, goal.y)) {
+            geometry_msgs::msg::PoseStamped tip = out.path.poses.back();
+            tip.pose.position.x = goal.x;
+            tip.pose.position.y = goal.y;
+            // z stays on the path's own plane. The 2D pipeline's waypoint z is
+            // whatever the planner put there (ground height at that cell); the
+            // goal's z comes from an explo planner that thinks in 2D and may be
+            // 0. Taking the goal's z would drop the tip below the surface.
+            out.path.poses.push_back(tip);
+            ++goal_snap_appends_;
+          } else {
+            ++goal_snap_blocked_;
+          }
+        }
+      }
       // Stamp the goal orientation onto the last waypoint so the controller
       // can rotate in place to face the desired direction after reaching it.
       // Only stamp if the last waypoint is near the actual goal — the local
       // planner's path ends at an intermediate target, not the final goal.
+      // After a successful append dg is 0, so this always fires on the new tip.
       if (!out.path.poses.empty()) {
         const auto & wp = out.path.poses.back().pose.position;
         double dg = std::hypot(wp.x - goal.x, wp.y - goal.y);
@@ -871,6 +924,25 @@ private:
           out.path.poses.size(), path_length(out.path), goal.x, goal.y,
           latest_map_.info.width, latest_map_.info.height,
           latest_map_.info.resolution);
+      }
+
+      // D2. Both counters, on both roles, or the rule is unfalsifiable.
+      //
+      // An append that never fires and an append that fires on every plan look
+      // identical from the outside -- the path just ends where it ends. The
+      // blocked count is the half that matters most: it is the only evidence
+      // that the segment test is doing work rather than rubber-stamping, and if
+      // it stays at zero across a campaign the guard is not a guard.
+      //
+      // role= is in the line because BOTH planner instances log under the same
+      // `<robot>.nav_liveness` name (that name is what survives the launch's
+      // per-logger :=warn selector), so without it the global and local
+      // instances' lines are indistinguishable in the campaign log.
+      if (!is_uav_ && (goal_snap_appends_ > 0 || goal_snap_blocked_ > 0)) {
+        RCLCPP_INFO_THROTTLE(liveness_logger_, *get_clock(), 30000,
+          "goal snap: role=%s appended=%ld blocked=%ld (max %.2fm, inflated grid)",
+          is_local_role_ ? "local" : "global",
+          goal_snap_appends_, goal_snap_blocked_, kGoalSnapMaxM);
       }
     } else if (has_prev_path_ && (is_uav_ || path_still_valid(prev_full_path_, latest_map_))) {
       // Re-stamp orientation on reused path if last waypoint is near goal.
@@ -924,6 +996,11 @@ private:
   bool has_map_{false};
   bool has_global_path_{false};
   nav_msgs::msg::Path latest_global_path_;
+
+  // D2. Lifetime counts of the goal-snap append: how often the true goal was
+  // put back on the end of the path, and how often the segment test refused.
+  long goal_snap_appends_{0};
+  long goal_snap_blocked_{0};
   int ticks_since_goal_msg_{0};
 
   // Starvation watch: consecutive 100 ms ticks spent with a goal and a pose

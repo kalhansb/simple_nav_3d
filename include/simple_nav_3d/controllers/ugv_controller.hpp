@@ -21,6 +21,9 @@ public:
     const MapSnapshot & map_snapshot) override;
 
   void on_path_cleared() override;
+  // D2. The back-up-and-turn recovery is tick-counted, so a node that stops
+  // calling compute_command() mid-recovery suspends it rather than ending it.
+  bool has_pending_maneuver() const override {return recovery_active_;}
 
 private:
   // Deterministic 2-phase recovery: drive straight backwards into known

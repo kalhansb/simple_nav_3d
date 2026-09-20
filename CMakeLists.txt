@@ -109,6 +109,18 @@ if(BUILD_TESTING)
   # Unguarded, the same situation is a hard CMake error naming the target.
   ament_add_gtest(test_ugv_planner test/test_ugv_planner.cpp)
   target_link_libraries(test_ugv_planner simple_nav_3d_core)
+  # D2. segment_free is header-only on purpose: its caller is the planner node,
+  # an executable that cannot be linked into a test, so the guard was lifted out
+  # to where it can be pinned. The link is still needed for the ROS message
+  # types the fixtures build.
+  ament_add_gtest(test_goal_snap test/test_goal_snap.cpp)
+  target_link_libraries(test_goal_snap simple_nav_3d_core)
+  # D2b. same_goal_pose lives in grid_utils.hpp for the same reason: its caller
+  # is the navigator node, which is an executable and cannot be linked into a
+  # test. The predicate decides whether an upstream goal revision reaches the
+  # controller at all, so it is pinned where it can be.
+  ament_add_gtest(test_goal_identity test/test_goal_identity.cpp)
+  target_link_libraries(test_goal_identity simple_nav_3d_core)
   ament_target_dependencies(test_ugv_planner
     rclcpp
     geometry_msgs

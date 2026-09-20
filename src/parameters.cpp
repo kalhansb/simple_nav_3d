@@ -123,6 +123,11 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   p.ugv_max_linear_vel_mps = node.declare_parameter<double>("ugv.max_linear_vel_mps", 1.2);
   p.ugv_max_angular_vel_rps = node.declare_parameter<double>("ugv.max_angular_vel_rps", 1.0);
   p.ugv_goal_xy_tol_m = node.declare_parameter<double>("ugv.goal_xy_tol_m", 0.2);
+  // D2. Default matches the UAV counterpart in spirit but is set to the value
+  // the launch file was already trying to pass, so declaring it changes nothing
+  // for the dscovox pipeline and gives every other caller the same number the
+  // controller used to hardcode (rounded from 0.15 to the launch's 0.2).
+  p.ugv_goal_yaw_tol_rad = node.declare_parameter<double>("ugv.goal_yaw_tol_rad", 0.2);
   p.ugv_heading_kp = node.declare_parameter<double>("ugv.heading_kp", 1.5);
   p.ugv_linear_kp = node.declare_parameter<double>("ugv.linear_kp", 0.8);
   p.ugv_avoidance_hard_stop_distance_m = node.declare_parameter<double>(
@@ -227,6 +232,7 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   require_positive(p.ugv_max_linear_vel_mps, "ugv.max_linear_vel_mps");
   require_positive(p.ugv_max_angular_vel_rps, "ugv.max_angular_vel_rps");
   require_positive(p.ugv_goal_xy_tol_m, "ugv.goal_xy_tol_m");
+  require_positive(p.ugv_goal_yaw_tol_rad, "ugv.goal_yaw_tol_rad");
   require_positive(p.ugv_heading_kp, "ugv.heading_kp");
   require_positive(p.ugv_linear_kp, "ugv.linear_kp");
   require_positive(

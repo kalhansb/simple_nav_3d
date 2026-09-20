@@ -1,6 +1,7 @@
 #ifndef SIMPLE_NAV_3D__PARAMETERS_HPP_
 #define SIMPLE_NAV_3D__PARAMETERS_HPP_
 
+#include <algorithm>  // std::max, used by the tolerance accessors below
 #include <string>
 
 #include "rclcpp/rclcpp.hpp"
@@ -63,6 +64,13 @@ struct NodeParameters
   double ugv_max_linear_vel_mps;
   double ugv_max_angular_vel_rps;
   double ugv_goal_xy_tol_m;
+  // D2. Declared because launch/simple_nav_3d.launch.py has been SETTING
+  // `ugv.goal_yaw_tol_rad` since the dscovox UGV pipeline was written, and an
+  // undeclared parameter passed to a node that does not allow undeclared
+  // overrides is dropped without a word. Every campaign cell therefore ran the
+  // controller's rotate-to-goal branch against a hardcoded 0.15 rad while the
+  // launch file said 0.2 -- a discrepancy no log line would ever have shown.
+  double ugv_goal_yaw_tol_rad;
   double ugv_heading_kp;
   double ugv_linear_kp;
   double ugv_avoidance_hard_stop_distance_m;
