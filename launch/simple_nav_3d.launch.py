@@ -150,6 +150,12 @@ def launch_setup(context):
         dscovox_global_plan_params = {
             "publish_global_planning_map": True,
             "global_planning_map_topic": "~/global_planning_map",
+            # Un-inflated twin of the above, published from the same tick. The
+            # planner's DONE coverage test reads this one; the inflated grid
+            # scores never-sensed cells as known. dscovox_node ONLY -- the
+            # scovox_node block above does not declare this parameter and would
+            # refuse to start with it.
+            "global_coverage_map_topic": "~/global_coverage_map",
             "global_planning_map_size_m": plan_glob_size,
             "global_planning_map_origin_x": -0.5 * plan_glob_size,
             "global_planning_map_origin_y": -0.5 * plan_glob_size,
