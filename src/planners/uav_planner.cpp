@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #include "simple_nav_3d/planners/uav_planner.hpp"
 
 #include <algorithm>
@@ -253,11 +254,10 @@ PlannerOutput UavPlanner::compute_plan(
   const int sx = grid.size_x;
   const int sy = grid.size_y;
 
-  // Nominal height penalty: penalize cells that deviate from the preferred
-  // flight altitude. This biases the path toward the nominal height while
-  // still allowing altitude changes when obstacles require it.
-  // The penalty blends between start Z, nominal Z, and goal Z based on
-  // progress along the path, so start/goal altitudes are respected.
+  // Height penalty biases the path toward uav_nominal_height_m while allowing
+  // climbs around obstacles; the preferred height blends start z, nominal, goal
+  // z by xy progress, so start and goal altitudes hold.
+  // (notes: uav-height-penalty)
   const double nominal_z = params_.uav_nominal_height_m;
   const double start_z = grid.origin_z + (static_cast<double>(start_cell.z) + 0.5) * grid.resolution;
   const double goal_z_val = grid.origin_z + (static_cast<double>(goal_cell.z) + 0.5) * grid.resolution;

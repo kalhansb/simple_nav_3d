@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #include <chrono>
 #include <cmath>
 
@@ -25,23 +26,16 @@ public:
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       params_.goal_topic, 10,
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-        // Ignore a re-publish of the goal already being driven. ORIENTATION IS
-        // PART OF THE COMPARISON: this test used to be position-only, which
-        // silently discarded every yaw-only goal revision before the controller
-        // could see it. See same_goal_pose() for why that mattered and why it
-        // was latent rather than observed.
+        // Ignore a re-publish of the goal already being driven. Orientation is
+        // part of the comparison, so a yaw-only revision passes through as a
+        // new goal. (notes: nav-ignore-same-goal)
         if (has_active_goal_ && same_goal_pose(active_goal_.pose, msg->pose)) {
           return;
         }
-        // Distinguish a genuinely NEW goal from a re-arm of the one just
-        // finished. Both are accepted — re-arming is how a goal published while
-        // this node was down gets picked up at all — but they are not equally
-        // interesting, and conflating them made the robot log unreadable: after
-        // arrival `has_active_goal_` is false, so an upstream that re-publishes
-        // an unchanged goal (the planner's keep-alive, or its EXPLOIT re-anchor
-        // at tick rate while the controller rotates) produced an
-        // accepted/reached INFO pair per re-publish — up to 10 per second, for
-        // as long as the rotation lasted.
+        // Tell a new goal from a re-arm of the one just reached. Both are
+        // accepted and republished; a re-arm logs at DEBUG so an upstream
+        // re-publishing an unchanged goal does not flood INFO.
+        // (notes: nav-new-goal-vs-rearm)
         const bool is_rearm =
           had_goal_ever_ && same_goal_pose(active_goal_.pose, msg->pose);
         active_goal_ = *msg;
@@ -92,12 +86,10 @@ private:
         : std::hypot(g.x - p.x, g.y - p.y);
       if (dist < final_goal_tolerance(params_)) {
         has_active_goal_ = false;
-        // Same reasoning as the re-arm branch above: an upstream that keeps
-        // re-publishing an unchanged goal after arrival makes this fire once per
-        // re-publish. The FIRST arrival on a given goal is the interesting one
-        // and stays at INFO; the repeats drop to DEBUG. `active_goal_` is still
-        // intact here (only the flag was cleared), so the comparison is against
-        // the goal that was just reached.
+        // The first arrival on a goal logs at INFO, repeats at DEBUG.
+        // active_goal_ is still intact here (only the flag was cleared), so the
+        // comparison is against the goal just reached.
+        // (notes: nav-repeat-arrival-log)
         const bool repeat = reached_goal_valid_ &&
           same_goal_pose(reached_goal_, active_goal_.pose);
         reached_goal_ = active_goal_.pose;
@@ -124,12 +116,10 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
 
   bool has_active_goal_{false};
-  /// A goal has been accepted at some point, so `active_goal_` holds a real
-  /// pose. Distinct from has_active_goal_, which is cleared on arrival: the
-  /// re-arm test below needs "what was the last goal" AFTER it stopped being
-  /// active, and reading a default-constructed active_goal_ before the first
-  /// goal would make the origin-with-identity-orientation compare equal to a
-  /// real goal at the origin.
+  /// True once any goal was accepted, so active_goal_ holds a real pose. Never
+  /// cleared on arrival, unlike has_active_goal_; stops a default active_goal_
+  /// matching a real goal at the origin in the re-arm test.
+  /// (notes: nav-had-goal-ever)
   bool had_goal_ever_{false};
   bool has_odom_{false};
   /// The goal this node last declared reached, for the repeat test on the

@@ -1,3 +1,4 @@
+# Moved comments: doc/simple_nav_3d.launch_notes.md
 """
 Unified simple_nav_3d launch file.
 
@@ -31,55 +32,24 @@ def launch_setup(context):
     mode = LaunchConfiguration("mode").perform(context)
     mapping = LaunchConfiguration("mapping").perform(context)
 
-    # Comma-separated list of peer robot names (e.g. "rama,charlie") for the
-    # multi-robot DSCovox topology. Empty (default) preserves single-robot
-    # behaviour bit-for-bit: dscovox_node only subscribes to its own
-    # /<robot>/scovox_node/scovox_bin. With peers set, the merger also
-    # subscribes to /<peer>/scovox_node/scovox_bin for each peer, giving
-    # this robot a per-robot fused view of the whole team's mapping.
+    # Comma-separated peer robot names. Empty (default) keeps single-robot
+    # behaviour: dscovox_node subscribes only to its own scovox_bin. With peers,
+    # the merger also reads each peer's, giving a per-robot fused team view.
+    # (notes: launch-peers)
     peers_raw = LaunchConfiguration("peers").perform(context)
     peers = [p.strip() for p in peers_raw.split(",") if p.strip()]
 
-    # Where this robot's merger listens for each PEER's scovox binary. The
-    # default is the peer's own publisher, i.e. today's behaviour unchanged.
-    # Under the message-level comms emulator the peer streams arrive instead on
-    # its relayed copies, and repointing the merger at those is the whole
-    # mechanism by which map sharing obeys the radio model: left on the direct
-    # topics, every robot merges every peer's map instantly and perfectly, and
-    # the comms arm of an experiment silently degenerates into the control arm
-    # while still producing a full set of plausible results.
-    #
-    # Placeholders: {peer} (or {robot}) = the peer being subscribed to, {self} =
-    # this robot. The emulator's relay convention is
-    #   "/{self}/rx/{peer}/scovox_node/scovox_bin".
-    #
-    # Self is deliberately NOT patterned. A robot's own binary never crosses a
-    # radio link, and routing it through an rx topic would leave the robot
-    # unable to see its own map whenever its own link was down — every arm would
-    # then measure a mapping failure rather than a comms one.
+    # Topic the merger reads each PEER's scovox binary from; default is the
+    # peer's own publisher. Under the comms emulator it must be the relayed rx
+    # copy, or map sharing bypasses the radio model. Self is never patterned.
+    # (notes: launch-peer-bin-topic-pattern)
     peer_bin_pattern = LaunchConfiguration(
         "peer_bin_topic_pattern").perform(context)
 
-    # scovox voxel edge length (m) on the lidar path. Default 0.10 = the value
-    # this launch has always used.
-    #
-    # It is the single biggest cost driver in a long run, and the cost is cubic:
-    # the lidar path carves free space along the WHOLE ray (carve_band -1) out to
-    # max_range 20 m, so every beam writes ~200 voxels at 0.10 m. Measured on a
-    # 2-robot flatforest run, the fused map reached 12.7M voxels by t=550 s and
-    # was still growing linearly with explored area. Everything that touches the
-    # map scales with it -- dscovox integration, the full ScovoxMap publish, and
-    # the planner's ingest plus whole-grid walk -- so past a few million voxels
-    # the planner's map subscription simply stops keeping up. That failure is
-    # silent and dangerous: one robot ran for three minutes on a frozen map,
-    # still driving, still logging steps, its coverage curve flat while its
-    # teammate's kept climbing.
-    #
-    # Raising this 0.10 -> 0.20 cuts the count ~8x. It also shrinks the
-    # ScovoxMapBinary delta payload by about as much, which matters beyond
-    # performance whenever the run is under a comms model: the deltas ARE what
-    # the radio carries, so severity calibration must be done at the resolution
-    # the campaign will actually run at, never carried over from another.
+    # scovox voxel edge length (m) on the lidar path, default 0.10. Voxel count,
+    # every map consumer's cost and the ScovoxMapBinary delta payload grow as
+    # res^-3; calibrate comms severity at the resolution you run.
+    # (notes: launch-voxel-resolution-cost)
     voxel_res = float(LaunchConfiguration("voxel_resolution_m").perform(context))
 
     def dscovox_input_topics():
@@ -88,24 +58,10 @@ def launch_setup(context):
             for p in peers
         ]
 
-    # Second, world-fixed planning map published by scovox_node for an
-    # EXPLORATION planner (explo_planner), on ~/global_planning_map.
-    #
-    # It cannot share ~/planning_map with the local nav planner: that one is a
-    # 20 m robot-centred crop, and simple_nav_3d's local planner has no window
-    # param of its own — the map extent IS its window, so widening it would put
-    # the whole world through the local A*/corridor mask on the control path.
-    # The exploration planner needs the opposite: a fixed envelope covering the
-    # ROI, because it rejects candidates whose cell is out of bounds and
-    # measures coverage termination over the ROI clipped to the grid. Hence two
-    # publishers over the same voxel grid.
-    #
-    # Sizing: the envelope is world-fixed and centred on the world origin, and
-    # so is the planner's ROI, so the side must be at least the ROI SIDE
-    # (= 2 x roi half-extent) to cover it, plus margin for a robot that drifts
-    # outside the ROI — its own cell must be in bounds or the reachability
-    # flood starts nowhere. Default 0 = off, which is what every
-    # non-exploration run wants.
+    # Optional world-fixed map from scovox_node on ~/global_planning_map for the
+    # exploration planner; ~/planning_map stays the local planner's rolling
+    # crop. Side must cover the ROI side plus margin; 0 = off.
+    # (notes: launch-global-planning-map-scovox)
     plan_glob_size = float(
         LaunchConfiguration("global_planning_map_size_m").perform(context))
     plan_glob_res = float(
@@ -129,22 +85,10 @@ def launch_setup(context):
             "global_planning_map_inflation_m": 1.5,
         }
 
-    # The SAME world-fixed envelope, published by the MERGER over the FUSED
-    # grid. scovox_node's copy above sees only what this robot measured itself;
-    # dscovox_node's sees the team map, which is the domain the exploration
-    # planner's candidates and its coverage-termination test actually live in.
-    # Pointing the planner at the local map while it plans over the fused one
-    # is a map-domain mismatch: a candidate in ground the PARTNER surveyed is
-    # unknown-and-therefore-unreachable on the local map, so it is rejected.
-    # Identical envelope and resolution to the scovox copy on purpose — the
-    # two are meant to be comparable cell-for-cell, and the planner ROI is
-    # sized against this side length.
-    #
-    # NOTE the topic: ~/global_planning_map, never ~/planning_map. Both the
-    # exploration planner and — since the generation-5 fix — the nav global
-    # planner subscribe to this name. ~/planning_map means the 20 m rolling
-    # crop from scovox_node, which the LOCAL nav planner consumes; the two are
-    # different maps with different jobs and must keep different names.
+    # The same envelope from the merger over the fused team grid, the
+    # exploration planner's map domain; keep it identical to the scovox copy.
+    # Topic is ~/global_planning_map, never ~/planning_map (the local crop).
+    # (notes: launch-global-planning-map-dscovox)
     dscovox_global_plan_params = {}
     if plan_glob_size > 0.0:
         dscovox_global_plan_params = {
@@ -257,16 +201,10 @@ def launch_setup(context):
             "ugv.goal_yaw_tol_rad": 0.2,
             "ugv.heading_kp": 1.5,
             "ugv.linear_kp": 0.8,
-            # Generation 5: raised 0.15 -> 0.4. At 0.15 the recovery state
-            # machine was unreachable — it did not fire once in 72 campaign
-            # robot-runs, including runs where a robot sat immobilised for ten
-            # minutes, because the slowdown scaling above it
-            #   scale = (clearance - hard_stop) / (slowdown - hard_stop)
-            # drives commanded speed to zero as clearance approaches the
-            # threshold, so the robot creeps to a halt just outside it and the
-            # trigger is never crossed. 0.4 sits inside the band the robot can
-            # still reach under power. It must stay strictly below
-            # avoidance_slowdown_distance_m or the span goes non-positive.
+            # Recovery trigger clearance (m). Must sit inside the band the robot
+            # still reaches under power, and strictly below
+            # avoidance_slowdown_distance_m or the slowdown span goes
+            # non-positive. (notes: launch-hard-stop-distance)
             "ugv.avoidance_hard_stop_distance_m": 0.4,
             "ugv.avoidance_slowdown_distance_m": 0.8,
             "ugv.avoidance_max_range_m": 3.0,
@@ -335,13 +273,10 @@ def launch_setup(context):
         ))
 
     elif mapping == "dscovox":
-        # scovox_node: per-robot persistent local map.
-        # - Publishes ScovoxMapBinary snapshots to the dscovox merger. Only
-        #   voxels touched since the last publish are shipped (dirty-set
-        #   tracking); a fresh dscovox connection triggers a full snapshot.
-        # - planning_map is published as a 20x20m rolling crop centered on
-        #   the robot pose (mode=rolling). The underlying voxel grid is fully
-        #   persistent — only the publication is windowed.
+        # scovox_node: per-robot persistent map. Ships only voxels dirtied since
+        # the last publish (full snapshot on a fresh dscovox connection);
+        # planning_map is a 20x20 m rolling crop around the robot.
+        # (notes: launch-scovox-node-dscovox)
         nodes.append(Node(
             package="scovox_mapping",
             executable="scovox_mapping_node",
@@ -373,14 +308,10 @@ def launch_setup(context):
             }],
         ))
 
-        # dscovox_node: merges per-robot scovox snapshots into a global map.
-        # Stores one source grid per robot keyed by header.frame_id of incoming
-        # binaries; rebuilds the fused grid by additive Beta-conjugate
-        # consensus merge across sources at publish_rate_hz.
-        # Multi-robot fused view: subscribe to every team member's scovox_bin
-        # (self + peers). Each robot's dscovox_node is its own per-robot
-        # consensus merger -- there is no central merger. With peers=[] the
-        # input list collapses to the single-robot case.
+        # dscovox_node: this robot's own consensus merger (no central merger)
+        # over its and its peers' scovox_bin, one source grid per robot keyed by
+        # header.frame_id, fused at publish_rate_hz. Empty peers is
+        # single-robot. (notes: launch-dscovox-node-merger)
         dscovox_inputs = dscovox_input_topics()
         nodes.append(Node(
             package="scovox_mapping",
@@ -395,38 +326,24 @@ def launch_setup(context):
                 "pointcloud_topic": "~/pointcloud",
                 "map_frame": "map",
                 "publish_rate_hz": 1.0,
-                # Match the comms emulator's rx_qos_depth. On reconnect the
-                # relay releases a whole outage's backlog in one pass; a
-                # shallower reader here silently discards the excess and the
-                # fused map is permanently holed with no counter recording it.
-                # Harmless without the emulator — it is only a history bound.
-                #
-                # 500 -> 4000 (2026-08-16). At 500 this was the SHALLOW end of
-                # the chain for the 250 stems/ha world: 861 s outages queue
-                # ~1720 deltas at the ~2 Hz share rate, so all three dense cells
-                # finished with their two merged maps 1.5-1.8 % apart and every
-                # gate green. Keep this equal to comms_sim_params.yaml's
-                # rx_qos_depth — raising only one end fixes nothing, because the
-                # burst is discarded at whichever end is shallower.
+                # Must equal comms_sim_params.yaml's rx_qos_depth: on reconnect
+                # the relay releases an outage's backlog at once and the
+                # shallower end silently drops the excess. Only a history bound
+                # without the emulator. (notes: launch-bin-qos-depth-dscovox)
                 "scovox_bin_qos_depth": 4000,
                 **dscovox_global_plan_params,
-                # REMOVED: a planning_map_* block used to be passed here. Every
-                # key in it was undeclared in dscovox_node, so ROS accepted the
-                # values and nothing read them, while the nav global planner
-                # subscribed to the ~/planning_map topic they described. Those
-                # parameters made a dead topic look configured — the single
-                # most misleading thing in this launch file. The global planner
-                # now subscribes to dscovox's real ~/global_planning_map, whose
-                # geometry comes from dscovox_global_plan_params above.
+                # No planning_map_* params here: dscovox_node does not declare
+                # them. Its planning-map geometry comes from
+                # dscovox_global_plan_params.
+                # (notes: launch-dscovox-no-planning-map)
             }],
         ))
 
     elif mapping == "dscovox_lidar":
-        # Same rolling-mapper + per-robot-merger topology as "dscovox", but
-        # scovox_node integrates the lidar cloud (geometric Beta occupancy,
-        # no semantics). Sensor model mirrors
-        # scovox/config/scovox_lidar_geometric.yaml; share cadence mirrors
-        # scovox_robot_share.yaml (2 Hz coalesced deltas on the wire).
+        # Same topology as dscovox, but scovox_node integrates the lidar cloud
+        # (geometric Beta occupancy, no semantics). Sensor model mirrors
+        # scovox_lidar_geometric.yaml; share cadence mirrors
+        # scovox_robot_share.yaml. (notes: launch-dscovox-lidar-topology)
         scovox_fine_extra = {}
         if fine_band:
             # Mirrors scovox/config/scovox_fine_band.yaml (base 0.10 m ->
@@ -514,33 +431,20 @@ def launch_setup(context):
                 "map_frame": "map",
                 "publish_rate_hz": 1.0,
                 **dscovox_global_plan_params,
-                # Match the comms emulator's rx_qos_depth. On reconnect the
-                # relay releases a whole outage's backlog in one pass; a
-                # shallower reader here silently discards the excess and the
-                # fused map is permanently holed with no counter recording it.
-                # Harmless without the emulator — it is only a history bound.
-                #
-                # 500 -> 4000 (2026-08-16). At 500 this was the SHALLOW end of
-                # the chain for the 250 stems/ha world: 861 s outages queue
-                # ~1720 deltas at the ~2 Hz share rate, so all three dense cells
-                # finished with their two merged maps 1.5-1.8 % apart and every
-                # gate green. Keep this equal to comms_sim_params.yaml's
-                # rx_qos_depth — raising only one end fixes nothing, because the
-                # burst is discarded at whichever end is shallower.
+                # Must equal comms_sim_params.yaml's rx_qos_depth: on reconnect
+                # the relay releases an outage's backlog at once and the
+                # shallower end silently drops the excess. Only a history bound
+                # without the emulator. (notes: launch-bin-qos-depth-lidar)
                 "scovox_bin_qos_depth": 4000,
             }],
         ))
 
     # ── Navigation nodes (all namespaced under robot) ──────────────────
 
-    # Costmap node:
-    # - dscovox mode: the global planner subscribes directly to the dscovox
-    #   planning_map and the local planner subscribes directly to the
-    #   scovox_node planning_map, so the costmap does NOT forward any external
-    #   map. It only builds the sensor-based local_map used by the controller
-    #   for emergency stops.
-    # - scovox mode: forward scovox_node's planning_map as the global planner's
-    #   input (no separate local planner in this mode).
+    # dscovox modes: the planners read their maps directly, so the costmap only
+    # builds the sensor local_map the controller uses for emergency stops.
+    # scovox mode: it forwards scovox_node's planning_map to the global planner.
+    # (notes: launch-costmap-node-role)
     costmap_extra = {}
     if mapping == "scovox":
         costmap_extra["topics.external_local_map"] = f"/{robot}/scovox_node/planning_map"
@@ -555,20 +459,10 @@ def launch_setup(context):
     ))
 
     # ── Global planner ────────────────────────────────────────────────
-    # In dscovox mode the global planner reads dscovox's merged planning map
-    # directly (no costmap forwarding). For UAV it uses the 3D GetRegion
-    # service instead of a 2D map. In other modes it falls back to the
-    # costmap-built global map via topics.planning_map default.
-    #
-    # The map is ~/global_planning_map, NOT ~/planning_map. dscovox publishes
-    # two grids and only the former is usable for global planning: the latter
-    # is body-centred, so its origin moves with the robot and a plan is stale
-    # the moment the robot drives. Pointing this node at ~/planning_map was a
-    # silent no-op — nothing has ever published that name — and it left the
-    # global planner inert for the whole campaign history while the local
-    # planner drove alone on a 20 m horizon. That is the direct cause of the
-    # local-minimum traps in sections 28 and 32.9. See the starvation warning
-    # in simple_nav_planner_node.cpp, which now makes the same mistake loud.
+    # In dscovox modes reads the merger's ~/global_planning_map, never the
+    # body-centred ~/planning_map (stale once the robot moves); UAV also gets
+    # the GetRegion service. Other modes use the costmap's global map.
+    # (notes: launch-global-planner-map)
     global_planner_extra = {"pipeline.role": "global"}
     if mapping in ("dscovox", "dscovox_lidar"):
         global_planner_extra["topics.planning_map"] = (
@@ -591,14 +485,10 @@ def launch_setup(context):
     ))
 
     # ── Local planner (dscovox only, UGV only) ───────────────────────
-    # Reads scovox_node's 20x20m rolling planning_map AND the global planner's
-    # output path. On each replan it slices the global path to the segment
-    # inside the local window, uses that exit point as its A* target, and
-    # masks the local map to a corridor of half-width ugv.local_corridor_radius_m
-    # around the slice. This refines global within the local window without
-    # contradicting it. If the corridor is blocked (new obstacle on the global
-    # path) the local planner retries with a free A*. Side-flip rejection is
-    # still disabled here because the corridor already serves the same role.
+    # Reads scovox_node's rolling planning_map and the global path; its A*
+    # targets where the global path leaves the window, masked to a
+    # ugv.local_corridor_radius_m corridor, else free A*. Side-flip rejection is
+    # off. (notes: launch-local-planner-corridor)
     if mapping in ("dscovox", "dscovox_lidar") and not is_uav:
         local_planner_extra = {
             "pipeline.role": "local",

@@ -1,3 +1,4 @@
+# Moved comments: doc/simple_nav_3d_code_notes.md
 cmake_minimum_required(VERSION 3.8)
 project(simple_nav_3d)
 
@@ -102,11 +103,9 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 
   find_package(ament_cmake_gtest REQUIRED)
-  # No if(TARGET ...) guard, deliberately, and matching explo_planner's
-  # CMakeLists. ament_add_gtest skips target creation when gtest is missing,
-  # so the guard turned "the test suite was never built" into a clean build
-  # with zero tests — the failure mode is a green result that checked nothing.
-  # Unguarded, the same situation is a hard CMake error naming the target.
+  # No if(TARGET ...) guard, on purpose (as in explo_planner): without gtest the
+  # guard yields a green build with zero tests; unguarded, it is a hard CMake
+  # error. (notes: cmake-gtest-no-target-guard)
   ament_add_gtest(test_ugv_planner test/test_ugv_planner.cpp)
   target_link_libraries(test_ugv_planner simple_nav_3d_core)
   # D2. segment_free is header-only on purpose: its caller is the planner node,

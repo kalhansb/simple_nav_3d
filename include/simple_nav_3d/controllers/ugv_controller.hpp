@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #ifndef SIMPLE_NAV_3D__CONTROLLERS__UGV_CONTROLLER_HPP_
 #define SIMPLE_NAV_3D__CONTROLLERS__UGV_CONTROLLER_HPP_
 
@@ -53,29 +54,10 @@ private:
   double recovery_start_y_{0.0};
   double recovery_target_yaw_{0.0};
 
-  // Ticks spent inside the current recovery sequence, counted only on ticks
-  // where compute_recovery_command actually ran.
-  //
-  // WHY A TICK COUNT AND NOT A CLOCK. Both recovery phases exit on a physical
-  // condition — BACKUP on distance travelled or a blocked rear, TURN on yaw
-  // error — and neither can be reached by a robot that cannot move. A robot
-  // wedged with a clear rear arc (rear_clr stays above kRearMinClearance
-  // because the thing holding it is not in the map) commands reverse forever,
-  // and nothing else in the stack can preempt it: this class already hoists
-  // `recovery_active_` above the front-arc scan, which used to be the
-  // accidental way out. So the sequence needs a bound of its own.
-  //
-  // A tick count is that bound and not a timestamp because the guard must not
-  // depend on odom.header.stamp being populated — a zero stamp would make an
-  // elapsed-time cap read 0 s forever and silently disable the very check
-  // that exists to stop a silent hang.
-  //
-  // This used to note that a suspended recovery "should not age", since the
-  // node only calls in on a fresh non-empty path. That reasoning was sound for
-  // the tick unit but wrong about suspension: a recovery is no longer allowed
-  // to survive an empty path at all (see on_path_cleared), so the only gaps a
-  // tick count can now skip are stale-odom and stale-path ticks, where the
-  // robot is not executing the recovery either.
+  // Ticks spent in the current recovery, counted only when
+  // compute_recovery_command runs; bounds a recovery that cannot physically
+  // complete. A tick count, not a clock, so a zero odom.header.stamp cannot
+  // disable the bound. (notes: ugv-recovery-tick-bound)
   int recovery_ticks_{0};
 
 };

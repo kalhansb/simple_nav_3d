@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #include "simple_nav_3d/parameters.hpp"
 
 #include <stdexcept>
@@ -123,10 +124,8 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   p.ugv_max_linear_vel_mps = node.declare_parameter<double>("ugv.max_linear_vel_mps", 1.2);
   p.ugv_max_angular_vel_rps = node.declare_parameter<double>("ugv.max_angular_vel_rps", 1.0);
   p.ugv_goal_xy_tol_m = node.declare_parameter<double>("ugv.goal_xy_tol_m", 0.2);
-  // D2. Default matches the UAV counterpart in spirit but is set to the value
-  // the launch file was already trying to pass, so declaring it changes nothing
-  // for the dscovox pipeline and gives every other caller the same number the
-  // controller used to hardcode (rounded from 0.15 to the launch's 0.2).
+  // Default is the value the launch file passes, so declaring it changes
+  // nothing for the dscovox pipeline. (notes: nav-ugv-goal-yaw-tol-default)
   p.ugv_goal_yaw_tol_rad = node.declare_parameter<double>("ugv.goal_yaw_tol_rad", 0.2);
   p.ugv_heading_kp = node.declare_parameter<double>("ugv.heading_kp", 1.5);
   p.ugv_linear_kp = node.declare_parameter<double>("ugv.linear_kp", 0.8);

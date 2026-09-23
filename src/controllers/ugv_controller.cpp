@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #include "simple_nav_3d/controllers/ugv_controller.hpp"
 
 #include <algorithm>
@@ -84,11 +85,10 @@ FrontArcStats compute_front_arc_stats(
   return stats;
 }
 
-// Min bounding-box clearance to occupied cells inside an angular arc
-// centred on `center_angle_body` (body frame: 0 = forward, ±π = rear,
-// +π/2 = left, -π/2 = right). Used by the recovery state machine to check
-// rear clearance during BACKUP and to pick a turn direction when entering
-// recovery. Generalisation of compute_front_arc_stats.
+// Min bounding-box clearance to occupied cells in an arc centred on
+// center_angle_body (body frame: 0 forward, pi rear, +pi/2 left). Recovery uses
+// it for rear clearance in BACKUP and to pick the turn direction.
+// (notes: ugv-arc-clearance)
 double compute_arc_clearance(
   const simple_nav_3d::MapSnapshot & map_snapshot,
   const nav_msgs::msg::Odometry & odom,
@@ -159,30 +159,10 @@ std::string UgvController::name() const
   return "local_controller_ugv";
 }
 
-// An empty global path ends any recovery in progress, and says so. Two reasons.
-//
-// Correctness: the path empties when the goal is reached, cleared, or
-// withdrawn, and both pieces of recovery state were chosen for the OLD goal —
-// the backup distance is measured from the pose at entry, and the turn target
-// is an ABSOLUTE yaw computed once from the obstacle that was blocking then.
-// Previously the recovery merely suspended (the node stops calling
-// compute_command on an empty path) and resumed on the next non-empty path.
-// That resume steers toward a heading nothing has re-measured, from a
-// displacement origin the robot may have already left, and it owns the command
-// stream for up to the tick cap while doing it. Worse, a nav-budget expiry is
-// one of the most likely ways for a goal to be withdrawn, and a robot in
-// recovery is precisely a robot whose goal is about to time out — so this is
-// not a corner case, it is the common exit from a recovery.
-//
-// Pairing: a suspended recovery also produced a `-> recovery:` entry with no
-// `recovery EXIT:`, which in a grep is indistinguishable from a recovery that
-// never terminated — the one failure mode the entry/exit pairing check exists
-// to detect. It reported a fault that had not happened while masking the one
-// that had.
-//
-// This lives here, and not in compute_command's empty-path guard, because the
-// node does not call compute_command at all when the path is empty: a check
-// there is unreachable code that reads as if it works.
+// An empty path ends any recovery and logs a recovery EXIT, keeping entry/exit
+// lines paired; its backup origin and turn yaw belong to the old goal. Here
+// because compute_command is not called on an empty path.
+// (notes: ugv-recovery-ends-on-empty-path)
 void UgvController::on_path_cleared()
 {
   if (!recovery_active_) {
@@ -277,11 +257,10 @@ geometry_msgs::msg::Twist UgvController::compute_command(
   // drive from one that had already been scaled to a standstill.
   const double desired_linear = cmd.linear.x;
 
-  // Recovery owns the command stream until both phases complete. Checked here,
-  // ahead of the front-arc scan, because the scan's no-obstacle early return
-  // below would otherwise drop out of an in-progress recovery: a robot that has
-  // just backed away from the obstacle that triggered recovery often sees a
-  // clear arc, which used to abandon the sequence before the turn ever ran.
+  // Recovery owns the command stream until both phases complete. Checked before
+  // the front-arc scan, whose no-obstacle early return would otherwise abandon
+  // a recovery that has backed into a clear arc.
+  // (notes: ugv-recovery-before-front-arc)
   if (recovery_active_) {
     return compute_recovery_command(odom, map_snapshot);
   }
@@ -317,19 +296,10 @@ geometry_msgs::msg::Twist UgvController::compute_command(
     cmd.linear.x *= std::clamp(scale, 0.0, 1.0);
   }
 
-  // The proximity trigger. It did not fire once in 72 campaign robot-runs at
-  // the old 0.15 m threshold, including runs where a robot sat immobilised for
-  // ten minutes, because the slowdown scaling immediately above decays the
-  // commanded speed toward zero *before* clearance reaches the threshold: the
-  // robot asymptotes into a creep and never crosses it. Generation 5 raises
-  // ugv.avoidance_hard_stop_distance_m to 0.4 m so the trigger sits inside the
-  // band the robot can actually reach while still commanding motion.
-  //
-  // The cost is that it will also fire on genuinely tight-but-passable gaps.
-  // That is a known and accepted trade, not an oversight — an unreachable
-  // recovery is worth less than one that occasionally fires early, and the
-  // pilot gate measures the entry rate per robot-run before any full campaign
-  // commits to it.
+  // Proximity trigger. ugv.avoidance_hard_stop_distance_m must sit inside the
+  // band the slowdown scaling above still lets the robot reach, or it never
+  // fires; firing on tight-but-passable gaps is accepted.
+  // (notes: ugv-proximity-trigger)
   if (clearance < params_.ugv_avoidance_hard_stop_distance_m) {
     return enter_recovery(odom, map_snapshot, "HARD STOP", desired_linear, clearance);
   }
@@ -377,14 +347,10 @@ geometry_msgs::msg::Twist UgvController::enter_recovery(
   return compute_recovery_command(odom, map_snapshot);
 }
 
-// Two-phase deterministic recovery:
-//   BACKUP: drive straight backwards until we've travelled kBackupDistance
-//           OR rear clearance gets too tight (give up the backup early).
-//   TURN:   rotate in place to the absolute target yaw chosen at recovery
-//           entry (current yaw ± 90 deg).
-// On TURN completion, clears recovery_active_ so normal control resumes
-// the next tick. The phase progression terminates deterministically — no
-// time-based cooldown, no oscillation hysteresis needed.
+// Two-phase recovery: BACKUP reverses until kBackupDistance or the rear arc is
+// tighter than kRearMinClearance; TURN rotates in place to the absolute yaw
+// fixed at entry (+/-90 deg), then clears recovery_active_.
+// (notes: ugv-two-phase-recovery)
 geometry_msgs::msg::Twist UgvController::compute_recovery_command(
   const nav_msgs::msg::Odometry & odom,
   const MapSnapshot & map_snapshot)
@@ -411,12 +377,10 @@ geometry_msgs::msg::Twist UgvController::compute_recovery_command(
   const double half_body_width = 0.5 * params_.robot_body_width_m;
 
   if (++recovery_ticks_ > kRecoveryMaxTicks) {
-    // Abandon rather than hang. Handing the robot back to normal control does
-    // not pretend the obstacle is gone: if it is still inside the hard-stop
-    // range the next tick re-enters recovery, which is a bounded, logged,
-    // observable cycle instead of a silent permanent reverse. The escalation
-    // beyond that belongs to the exploration planner, which times the goal out
-    // on nav_max_timeout_sec and blacklists it.
+    // Abandon rather than hang: if the obstacle is still within hard-stop range
+    // the next tick re-enters recovery, a bounded, logged cycle. Further
+    // escalation is the exploration planner's goal timeout.
+    // (notes: ugv-recovery-timeout-abandon)
     fprintf(stderr,
       "[ugv_ctrl] recovery EXIT: TIMEOUT after %d ticks in %s at (%.2f, %.2f) "
       "— abandoning recovery, returning to normal control\n",

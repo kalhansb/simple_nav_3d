@@ -1,25 +1,10 @@
 // D2b. same_goal_pose(): the predicate the navigator's goal intake uses to
 // decide whether an incoming goal is the one it is already driving.
 //
-// THE DEFECT. The intake used to compare `pose.position` with `==` on three
-// doubles and ignore `pose.orientation` outright, so a goal revision that
-// changed only the heading was discarded before the controller could see it —
-// while the controller, two nodes downstream, documents the opposite contract:
-// "A change in ORIENTATION alone is not [a new destination], because the tick
-// below re-reads the target yaw out of active_goal_ every time -- an in-place
-// yaw revision is simply tracked." The controller was written to a promise the
-// intake broke.
-//
-// It was LATENT, and that is stated here so the fix is not later misread as
-// having changed a result: with the omnidirectional sensor model the
-// exploration planner drops its yaw arrival term outside EXPLOIT, its EXPLOIT
-// re-anchor publishes position and yaw together in one message, and its homing
-// arrival test is distance-only. No shipped path waits on a yaw-only update.
-// The fix removes a trap for the next one that does.
-//
-// The second half of these tests is about the OTHER direction — a goal that did
-// NOT change must compare equal even after a float round-trip, because the old
-// exact `==` made any round-trip read as a new goal and re-armed the navigator.
+// The tests pin both directions: a yaw-only revision is a new goal, and a goal
+// changed only by float round-trip noise compares equal.
+// (notes: test-goal-identity-background)
+// Moved comments: doc/simple_nav_3d_code_notes.md
 
 #include <gtest/gtest.h>
 
@@ -129,18 +114,9 @@ geometry_msgs::msg::Pose round_tripped(geometry_msgs::msg::Pose p)
 }
 }  // namespace
 
-// A goal that survived a float round-trip is STILL the same goal. The old
-// intake used `==`, so any re-serialisation read as new, re-armed the navigator
-// and restarted its accept/reached cycle on a goal nobody had revised.
-//
-// THE COORDINATES ARE THE POINT. This test used to run at x = 12.345678, where a
-// half-ULP of float32 is 4.8e-7 m and the then-default 1e-6 m tolerance had room
-// to spare. The shipped ROI is x in [-51.3, 100.9], y in [-38.7, 74.5], and
-// float32 spacing scales with magnitude: at x = 75.4 the same round trip costs
-// 1.5e-6 m and at y = -88.37 it costs 2.7e-6 m, both OVER the old tolerance. The
-// test passed for the whole time the predicate was broken across ~90% of the
-// world, because the fixture sat in the one region where the check could not
-// bite. It now runs where the robots actually drive.
+// A goal that survived a float round-trip is still the same goal. The fixture
+// sits at large coordinates, where the round trip costs more than 1e-6 m; keep
+// it there or the check cannot bite. (notes: test-round-trip-world-scale)
 TEST(SameGoalPose, FloatRoundTripNoiseIsNotARevision)
 {
   const auto a = pose_at(75.4, -88.37, 0.35, 0.7853981633974483);

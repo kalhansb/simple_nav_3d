@@ -1,19 +1,9 @@
 // Known-answer tests for the global UGV planner.
 //
-// WHY THIS FILE EXISTS. For 66 out of 66 robot-logs in the mr1 campaign the
-// nav global planner never produced a single path: it subscribed to a
-// `planning_map` topic nothing published, so `latest_map_` stayed empty and
-// every tick returned before A* ran. That defect is fixed in the LAUNCH file
-// (the global planner now reads dscovox's `global_planning_map`), and a
-// launch-wiring defect cannot be caught by a unit test — the runtime gate for
-// it is the new "global plan ok:" heartbeat in the nav log, paired with the
-// "no map" starvation WARN, so presence and absence are both observable in the
-// same binary.
-//
-// What CAN be pinned down here is the thing the fix hands the planner: given a
-// map, does the planner actually plan, and does the generation-5 endpoint fast
-// path return the same answers the full scan did? These are the regression
-// guards for that.
+// Guards that, given a map, the planner plans, and that the endpoint fast path
+// returns the same answers as the full scan. Launch wiring of the map topic
+// cannot be caught by a unit test. (notes: ugv-planner-test-purpose)
+// Moved comments: doc/simple_nav_3d_code_notes.md
 
 #include <gtest/gtest.h>
 
@@ -97,11 +87,9 @@ NodeParameters make_params()
   return p;
 }
 
-// Read occupancy back out of the snapshot the planner will actually see, not
-// out of the OccupancyGrid we wrote. The two are separated by
-// snapshot_from_occupancy_grid's >= 50 threshold and its own indexing, and a
-// test that verifies its own fixture against the wrong one of those verifies
-// nothing. Out-of-bounds counts as occupied: the map edge is a wall.
+// Reads occupancy from the snapshot the planner sees (after the >= 50
+// threshold), not from the written OccupancyGrid. Out of bounds counts as
+// occupied: the map edge is a wall. (notes: ugv-test-snapshot-occupancy)
 bool cell_occupied(const MapSnapshot & snap, int cx, int cy)
 {
   if (cx < 0 || cy < 0 || cx >= snap.width || cy >= snap.height) {
@@ -120,16 +108,9 @@ int cell_y(const MapSnapshot & snap, double y)
   return static_cast<int>(std::floor((y - snap.origin_y) / snap.resolution));
 }
 
-// Seal a rectangular region by filling every cell of a `thickness`-cell ring
-// around the closed cell range [x0,x1] x [y0,y1].
-//
-// In CELL space, deliberately. The previous fixture drew each side by stepping
-// along it in metres at half the resolution, which looks like the safer choice
-// and is not: it fills the four sides and silently misses the four corner
-// cells, so what it built was a box with open corners. Cells are what A*
-// searches, so the fixture has to be written in the same units the property is
-// about — and the negative control below then checks the whole ring rather
-// than four lines that happen not to meet.
+// Fills every cell of a thickness-cell ring around the closed cell range
+// [x0,x1] x [y0,y1]. Written in cell space: stepping the sides in metres misses
+// the corner cells. (notes: ugv-test-seal-box-cell-space)
 void seal_box(nav_msgs::msg::OccupancyGrid & g, int x0, int y0, int x1, int y1, int thickness)
 {
   for (int cy = y0 - thickness; cy <= y1 + thickness; ++cy) {
@@ -271,18 +252,10 @@ TEST(UgvGlobalPlanner, BlockedGoalRelaxesToANearbyFreeCell)
   EXPECT_GT(std::hypot(last.x - 5.0, last.y - 0.0), 0.4);
 }
 
-// A goal walled off from the robot has no reachable endpoint that makes
-// progress; the planner must say so rather than invent one behind the wall.
-//
-// This test used to be vacuous in BOTH directions and is worth spelling out,
-// because it is the shape a lot of guards in this project decayed into. Its
-// only assertion sat inside `if (out.has_path)`, so a planner that never
-// planned at all — precisely the mr1 failure this file exists to guard —
-// passed it silently. And nothing checked that the box was actually sealed, so
-// a coordinate or resolution slip that left a gap would also pass, by planning
-// straight through the hole into the goal. It therefore needs both a NEGATIVE
-// control (the seal is real) and a POSITIVE one (the planner is alive on this
-// exact map), or "no path" means nothing.
+// A walled-off goal must not get a path behind the wall. The test needs a
+// negative control (the seal is closed) and a positive control (the planner
+// plans on this map), or a refusal proves nothing.
+// (notes: ugv-test-enclosed-goal-controls)
 TEST(UgvGlobalPlanner, FullyEnclosedGoalYieldsNoPath)
 {
   auto grid = make_grid();
@@ -326,12 +299,10 @@ TEST(UgvGlobalPlanner, FullyEnclosedGoalYieldsNoPath)
 
   const auto out = planner.compute_plan(odom_at(-6.0, 0.0), goal_at(6.0, 0.0), snap);
   if (out.has_path) {
-    // Relaxation is allowed — the endpoint just has to be outside the seal.
-    // Assert on every waypoint, not only the last: a path that tunnels through
-    // the wall and comes back out would satisfy an endpoint-only check.
-    // Tested in cell space against the interior the fixture actually sealed;
-    // a metre-space bounding box of the OUTER ring also covers the free ground
-    // just outside the corners, and flags a legal path as a violation.
+    // Relaxation is allowed, but no waypoint may enter the sealed interior.
+    // Checked in cell space against the interior actually sealed; a metre-space
+    // box of the outer ring flags legal paths.
+    // (notes: ugv-test-relaxed-path-check)
     for (const auto & ps : out.path.poses) {
       const double x = ps.pose.position.x;
       const double y = ps.pose.position.y;

@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #include "simple_nav_3d/planners/ugv_planner.hpp"
 
 #include <algorithm>
@@ -312,19 +313,9 @@ std::optional<GridIndex> best_goal_endpoint_cell(
   const double min_progress_cells =
     (start_to_goal_cells > 6.0) ? std::max(3.0, 0.2 * start_to_goal_cells) : 0.0;
 
-  // Fast path: the requested goal cell is itself free and reachable.
-  //
-  // This is provably the same answer the scan below would produce. The scan
-  // minimises heuristic(c, goal_raw), and the goal cell scores 0 — no other
-  // cell can beat it. It clears clear_toward_goal() trivially (zero-length
-  // ray), and it clears the min-progress filter by construction: that filter
-  // is either 0, or max(3, 0.2*d) with d > 6, and the goal cell's distance
-  // from the start IS d.
-  //
-  // Worth a special case only because of what it skips. The scan is a full
-  // width*height sweep running a Bresenham ray per candidate cell; on the
-  // 375x375 global grid that is on the order of 1e7 cell visits, every replan,
-  // for the common case where the goal is plainly reachable.
+  // Fast path: the goal cell is free and reachable. It is exactly what the scan
+  // below would return (it scores 0 and passes both filters), and it skips the
+  // full width*height sweep. (notes: ugv-goal-endpoint-fast-path)
   if (occupied[flatten(goal_raw, width)] == 0 && reachable[flatten(goal_raw, width)] != 0) {
     return goal_raw;
   }
@@ -406,19 +397,10 @@ std::optional<GridIndex> best_goal_endpoint_cell(
   return best;
 }
 
-// When the robot is parked inside an inflated obstacle halo (e.g. next to
-// a tree), the start cell ends up surrounded by occupied cells and A* can't
-// find any path out — flood fill returns {start} only and the planner emits
-// an empty path. We can't safely free the entire halo (the inflation exists
-// for a reason), but we *can* carve a minimum-length corridor from the start
-// to the nearest originally-free cell. The robot is physically *here*, so
-// any cells it passes through to escape were always passable.
-//
-// Strategy: BFS from start that walks *through* occupied cells, recording
-// parent pointers. The first originally-free cell we touch is the escape
-// breakthrough; we then walk the parent chain back and free only those
-// cells. Bounded to max_carve_cells so the planner can't free arbitrary
-// chunks of the map if the robot is genuinely deep inside an obstacle.
+// Frees a minimum-length corridor from a start boxed in by inflated cells to
+// the nearest originally-free cell: BFS through occupied cells, then only the
+// parent chain is freed. Bounded by max_carve_cells.
+// (notes: ugv-carve-escape-corridor)
 void carve_escape_corridor(
   std::vector<uint8_t> & occupied,
   int width,
@@ -588,11 +570,9 @@ PlannerOutput UgvPlanner::compute_plan(
   // Ensure start cell is free to avoid immediate failure at robot center.
   occupied[flatten(start_idx, width)] = 0;
 
-  // If the robot is parked inside an inflated obstacle halo (next to a tree,
-  // pinned against a wall, etc.), all neighbours of the start cell are also
-  // occupied and A* would return an empty path. Carve the minimum corridor
-  // out so the planner has somewhere to escape to. Budget the carve to
-  // ~2 m so we never free arbitrary chunks of the map.
+  // If the start is boxed in by an inflated halo, carve a minimum escape
+  // corridor. Budgeted to 2 m so the carve never frees arbitrary chunks of the
+  // map. (notes: ugv-escape-carve-budget)
   const int max_carve_cells = std::max(
     1, static_cast<int>(std::ceil(2.0 / map_snapshot.resolution)));
   carve_escape_corridor(occupied, width, height, start_idx, max_carve_cells);

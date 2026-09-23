@@ -1,25 +1,10 @@
 // Known-answer tests for segment_free, the authorisation test behind D2's
 // goal-snap append.
 //
-// WHY THIS FILE EXISTS. Across the ts1b campaign the median arrival parked
-// 0.269 m from the commanded goal while the exploration planner judged arrival
-// against a 0.4 m tolerance -- and failGoal() blacklists the cell the robot is
-// standing on, so a shortfall is not a retry, it is a poisoned position. The
-// shortfall is quantisation: a 0.40 m global cell, a 0.20 m local cell, and a
-// controller stop tolerance, composed. D2 closes it by appending the true goal
-// to the end of the path, but only when the straight run to it is clear.
-//
-// That "only when" is the whole safety argument, and it is one function. The
-// append itself lives in the planner NODE, which is an executable and not
-// linkable, which is exactly why segment_free was lifted into a header: the
-// guard is the part that must not be wrong, so it is the part that gets pinned.
-//
-// The convention under test that is easiest to get backwards: out of bounds
-// BLOCKS here. path_still_valid() skips OOB cells because it is keeping an
-// already-searched path alive; this function authorises a segment nothing ever
-// searched, so unknown must refuse. A regression that "fixes" the OOB case to
-// match path_still_valid would let the planner extend paths off the edge of the
-// map, which is precisely the failure the guard exists to prevent.
+// segment_free authorises the goal-snap append. Out of bounds BLOCKS here,
+// unlike path_still_valid(); do not change it to match, or the planner can
+// extend paths off the map edge. (notes: goal-snap-segment-free-oob-blocks)
+// Moved comments: doc/test_goal_snap_notes.md
 
 #include <gtest/gtest.h>
 
@@ -43,16 +28,10 @@ constexpr double kRes = 0.20;   // the local planning map's resolution
 constexpr int kW = 50;          // 10 m
 constexpr int kH = 50;
 
-// The resolution the code under test actually divides by.
-//
-// OccupancyGrid::info::resolution is a FLOAT, and snapshot_from_occupancy_grid
-// widens it to double, so the nominal 0.20 arrives as 0.20000000298023224. Cell
-// indices computed from the literal 0.20 therefore land one cell LOW at every
-// exact multiple of the resolution: floor(3.0 / 0.20) is 15, floor(3.0 /
-// 0.20000000298) is 14. The first six versions of the tests below all failed for
-// this reason and the failure looked like a bug in the traversal rather than in
-// the fixture. The fixture must do the same widening the code does, so the cell
-// it marks is the cell the test is about.
+// The resolution the code under test divides by: the grid resolution is a float
+// widened to double, so indices from the literal 0.20 land one cell low at
+// exact multiples. The fixture must widen the same way.
+// (notes: goal-snap-float-resolution)
 constexpr double kResExact = static_cast<double>(static_cast<float>(kRes));
 
 int cell_of(double v)
@@ -173,14 +152,9 @@ TEST(SegmentFree, OccupiedStartEndpointBlocks)
   EXPECT_FALSE(segment_free(snap, 5.1, 5.0, 5.5, 5.0));
 }
 
-// The property that motivated replacing the sampler with an exact walk: a
-// segment that clips an occupied cell over a chord far SHORTER than any sane
-// sample step is still caught.
-//
-// The geometry is written in cell coordinates and the chord length is asserted,
-// not assumed, because the whole point is that the chord is tiny -- a test that
-// silently built a long chord would pass against the sampler too and would not
-// be testing anything.
+// A segment clipping an occupied cell over a chord far shorter than any sample
+// step must still be refused. The geometry is written in cell coordinates so
+// the chord really is tiny. (notes: goal-snap-tiny-corner-chord)
 TEST(SegmentFree, TinyCornerChordIsCaught)
 {
   constexpr int kBx = 12;
@@ -189,17 +163,10 @@ TEST(SegmentFree, TinyCornerChordIsCaught)
   occupy_cell(g, kBx, kBy);
   const auto snap = snapshot_from_occupancy_grid(g);
 
-  // Cut down-right across the cell's lower-left corner. The segment enters
-  // through the left edge 1 mm above the corner and leaves through the bottom
-  // edge 1 mm right of it, so the chord inside the occupied cell is
-  // hypot(1mm, 1mm) = 1.4 mm -- 35x shorter than the quarter-cell (50 mm) step
-  // the sampler used, and no sample step fixes that because halving the step
-  // only halves the chord it misses.
-  //
-  // The sign convention matters and is easy to get backwards: a down-right
-  // segment through this corner clips EITHER (kBx,kBy) or the diagonally
-  // opposite (kBx-1,kBy-1) depending on which boundary it crosses first, so the
-  // entry/exit geometry is asserted below rather than eyeballed.
+  // Cuts down-right across the cell's lower-left corner, entering 1 mm above it
+  // and leaving 1 mm right of it. Which cell it clips depends on the boundary
+  // crossed first, so the geometry is asserted below.
+  // (notes: goal-snap-corner-chord-geometry)
   const double lo_x = cell_lo(kBx);
   const double lo_y = cell_lo(kBy);
   const double a_x = lo_x - 0.010;
@@ -242,26 +209,10 @@ TEST(SegmentFree, DiagonalThroughAnOccupiedCellBlocks)
 // ---------------------------------------------------------------------------
 // F19. Exact corner crossings.
 //
-// Two separate defects, and they need two separate guards, so the negative
-// control for one does not cover the other.
-//
-// (a) THE EXACT TIE. A 45-degree segment between two cell centres leaves its
-//     cell across both boundaries at the same t, at EVERY corner it crosses. The
-//     traversal resolved that with a bare `else` that stepped y, entering one
-//     shoulder cell and not the other. Guarded by ACornerCrossingIsSymmetric,
-//     whose real content is that BOTH shoulders now block.
-//
-// (b) THE NEAR-TIE. An exact geometric corner is not always an exact
-//     floating-point tie: on the segment in TheNearTieCornerIsSymmetric the
-//     computed gap is 2.8e-17 and 4.4e-16 rather than zero, with opposite signs
-//     depending on which endpoint the parameters were computed from. No tie
-//     branch can catch that. It is fixed by ordering the endpoints before the
-//     walk, and guarded by SegmentFreeIsSymmetricOverASweep -- which is where it
-//     was found, by sweeping angles rather than by reasoning about the tie.
-//
-// Because the endpoints are now ordered, every forward-vs-reverse assertion here
-// is true BY CONSTRUCTION. That is the point: these tests exist to fail if the
-// ordering is ever removed, and removing it does fail the sweep.
+// Guards two corner defects: the exact tie (both shoulders must block) and the
+// near-tie (fixed by ordering endpoints before the walk). Forward/reverse
+// equality holds by construction; removing the ordering fails the sweep.
+// (notes: goal-snap-corner-crossing-defects)
 // ---------------------------------------------------------------------------
 
 namespace
@@ -275,11 +226,9 @@ double cell_ctr(int c)
 }
 }  // namespace
 
-// CALIBRATION, and it is not optional: every assertion below is about the tie
-// branch, so if this geometry does not actually tie, those tests are silently
-// exercising the ordinary one-axis step and proving nothing about the fix.
-// This recomputes the two crossing parameters with the same expressions the
-// function uses and demands they be BITWISE equal.
+// Calibration: the corner tests below exercise the tie branch only if this
+// geometry ties, so the two crossing parameters are recomputed as segment_free
+// does and must be bitwise equal. (notes: goal-snap-tie-calibration)
 TEST(SegmentFree, TheCornerFixtureReallyTies)
 {
   const double x0 = cell_ctr(10), y0 = cell_ctr(10);
@@ -291,15 +240,10 @@ TEST(SegmentFree, TheCornerFixtureReallyTies)
          "they exercise the ordinary step and assert nothing";
 }
 
-// THE DEFECT, pinned. One occupied shoulder, and the answer must not depend on
-// which end you start from. Before the fix, blocking (10,11) gave blocked
-// forwards and free backwards, and blocking (11,10) gave the mirror image.
-//
-// The EXPECT_FALSE is what carries this test, not the EXPECT_EQ: with the
-// endpoints ordered the two calls are the same computation, so equality is
-// structural. Both shoulders blocking is not -- if the tie branch had not run,
-// the walk would traverse exactly one of them and the other would read free.
-// Deleting the tie branch fails this test and only this test.
+// Each corner shoulder, occupied alone, must block in both directions. The
+// EXPECT_FALSE carries the test: with ordered endpoints the EXPECT_EQ is
+// structural, and deleting the tie branch fails the EXPECT_FALSE.
+// (notes: goal-snap-shoulder-symmetry)
 TEST(SegmentFree, ACornerCrossingIsSymmetric)
 {
   const double x0 = cell_ctr(10), y0 = cell_ctr(10);
@@ -329,11 +273,10 @@ TEST(SegmentFree, TheCornerSegmentIsFreeOnOpenGround)
                            cell_ctr(10), cell_ctr(10)));
 }
 
-// The conservative direction, stated as its own claim rather than left implicit:
-// a segment threading the gap between two diagonally-opposed occupied cells is
-// refused. The permissive reading -- a zero-length corner touch is not a
-// crossing -- would allow it, and would be authorising the robot to drive
-// between two obstacles on an already-inflated grid.
+// Conservative by design: a segment threading between two diagonally opposed
+// occupied cells is refused. Treating a zero-length corner touch as no crossing
+// would let the robot pass between two obstacles.
+// (notes: goal-snap-diagonal-squeeze)
 TEST(SegmentFree, ADiagonalSqueezeBetweenTwoCornersIsRefused)
 {
   auto g = make_grid();
@@ -346,12 +289,9 @@ TEST(SegmentFree, ADiagonalSqueezeBetweenTwoCornersIsRefused)
                             cell_ctr(10), cell_ctr(10)));
 }
 
-// The specific segment the sweep found, pinned by name so the regression has a
-// witness that does not depend on the sweep's obstacle field or its bounds.
-// (8,11) -> (26,25) passes exactly through the corners at (13,15) and (22,22),
-// and before the endpoints were ordered it traversed (12,15) and (21,22) going
-// one way and (13,14) and (22,21) coming back -- the opposite shoulder of each
-// corner. Occupying one of those cells made the answer depend on argument order.
+// Near-tie witness from the sweep, pinned independently of its obstacle field:
+// (8,11) -> (26,25) passes exactly through the corners at (13,15) and (22,22);
+// each shoulder cell is occupied in turn. (notes: goal-snap-near-tie-witness)
 TEST(SegmentFree, TheNearTieCornerIsSymmetric)
 {
   for (const auto shoulder : {std::make_pair(12, 15), std::make_pair(13, 14),
@@ -407,13 +347,10 @@ TEST(SegmentFree, SegmentFreeIsSymmetricOverASweep)
   EXPECT_GT(free_count, 0) << "every segment was blocked; same problem";
 }
 
-// The diagonal step changes how fast the walk spends its step budget, and the
-// budget is capped: a walk that fails to reach the end cell returns FALSE. That
-// failure mode is invisible in the ordinary tests, because "blocked" is also the
-// right answer when something is genuinely in the way -- a non-converging walk
-// would quietly refuse every goal-snap on open ground and look conservative
-// rather than broken. So convergence is asserted directly, on open ground, over
-// the cases where the tie branch fires hardest or where it must NOT fire at all.
+// The walk's step budget is capped and a non-converging walk returns false,
+// which looks like a conservative refusal. So convergence is asserted directly
+// on open ground, for tie-heavy and tie-free geometry.
+// (notes: goal-snap-walk-convergence)
 TEST(SegmentFree, TheWalkConvergesOnTieHeavyAndDegenerateGeometry)
 {
   const auto snap = snapshot_from_occupancy_grid(make_grid());
@@ -443,10 +380,8 @@ TEST(SegmentFree, TheWalkConvergesOnTieHeavyAndDegenerateGeometry)
       << "vertical";
 }
 
-// Non-finite coordinates refuse. These already refused before the guard was
-// added, but only because casting floor(NaN) to int is undefined behaviour that
-// happened to land out of bounds on this platform. Pinned so the answer is a
-// rule rather than a property of this compiler.
+// Non-finite coordinates refuse by explicit rule, not by the undefined
+// behaviour of casting floor(NaN) to int. (notes: goal-snap-non-finite-guard)
 TEST(SegmentFree, NonFiniteCoordinatesRefuse)
 {
   const auto snap = snapshot_from_occupancy_grid(make_grid());
@@ -534,23 +469,10 @@ TEST(SegmentFree, OccupancyThresholdIsFifty)
   EXPECT_FALSE(segment_free(snapshot_from_occupancy_grid(g), 4.05, 4.05, 4.10, 4.05));
 }
 
-// Unknown (-1) reads as free. That is snapshot_from_occupancy_grid's existing
-// behaviour -- int8 -1 is not >= 50 -- and the goal-snap rule inherits it, so
-// it is stated rather than left to be discovered. This is the one place the
-// rule is NOT conservative: an unobserved cell inside the map is treated as
-// drivable.
-//
-// WHAT BOUNDS IT, stated carefully because the obvious argument is wrong. It is
-// NOT that the robot has already seen the ground under its own wheels: the
-// segment does not start under the wheels. At simple_nav_planner_node.cpp:881
-// the near end is `out.path.poses.back()` -- the LAST waypoint of the path,
-// i.e. the far end of the rolling window, where observation is thinnest. For
-// role=local the path ends at the slice exit point, which is at the local map's
-// edge by construction. The two bounds that do hold are kGoalSnapMaxM (0.6 m at
-// :878, so at most three cells on the 0.2 m grid) and the fact that the whole
-// pipeline already drives through unobserved space -- A* planned the 20 m that
-// got here on the same collapsed array. See the OUT OF BOUNDS paragraph in
-// occupancy_grid_utils.hpp for why that convention is not local to this guard.
+// Unknown (-1) reads as free, inherited from the >= 50 threshold: the one
+// non-conservative case. It is bounded by kGoalSnapMaxM (0.6 m), not by prior
+// observation, since the segment starts at the path's last waypoint.
+// (notes: goal-snap-unknown-reads-free)
 TEST(SegmentFree, UnknownCellsReadAsFree)
 {
   auto g = make_grid();

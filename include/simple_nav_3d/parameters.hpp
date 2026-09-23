@@ -1,3 +1,4 @@
+// Moved comments: doc/simple_nav_3d_code_notes.md
 #ifndef SIMPLE_NAV_3D__PARAMETERS_HPP_
 #define SIMPLE_NAV_3D__PARAMETERS_HPP_
 
@@ -15,13 +16,10 @@ struct NodeParameters
   std::string mode;
   std::string robot_namespace;
 
-  // Pipeline role: "global" or "local". Drives which input map / output path
-  // topic the planner uses, and which path topic the controller subscribes to.
-  // - "global": planner reads `planning_map_topic`, publishes `global_path_topic`;
-  //             controller subscribes to `global_path_topic`.
-  // - "local":  planner reads `local_planning_map_topic`, publishes `local_path_topic`;
-  //             controller subscribes to `local_path_topic`.
-  // Two planner instances can run in parallel with different roles.
+  // Pipeline role, "global" or "local": global planners read planning_map_topic
+  // and publish global_path_topic, local ones read local_planning_map_topic and
+  // publish local_path_topic; the controller follows its role's path topic.
+  // (notes: params-pipeline-role)
   std::string pipeline_role;
 
   std::string odom_topic;
@@ -64,12 +62,10 @@ struct NodeParameters
   double ugv_max_linear_vel_mps;
   double ugv_max_angular_vel_rps;
   double ugv_goal_xy_tol_m;
-  // D2. Declared because launch/simple_nav_3d.launch.py has been SETTING
-  // `ugv.goal_yaw_tol_rad` since the dscovox UGV pipeline was written, and an
-  // undeclared parameter passed to a node that does not allow undeclared
-  // overrides is dropped without a word. Every campaign cell therefore ran the
-  // controller's rotate-to-goal branch against a hardcoded 0.15 rad while the
-  // launch file said 0.2 -- a discrepancy no log line would ever have shown.
+  // Yaw tolerance for the controller's rotate-to-goal branch.
+  // launch/simple_nav_3d.launch.py sets it, so it must stay declared: an
+  // undeclared override is dropped silently.
+  // (notes: params-goal-yaw-tol-declared)
   double ugv_goal_yaw_tol_rad;
   double ugv_heading_kp;
   double ugv_linear_kp;
@@ -90,11 +86,10 @@ struct NodeParameters
   double ugv_replan_cost_threshold_m;
   double ugv_side_flip_cooldown_sec;
   double ugv_global_replan_period_sec;
-  // Half-width of the corridor the local planner builds around the global
-  // path. Cells outside the corridor are masked off so the local planner
-  // refines within global's chosen homotopy. Used only when role==local and
-  // a global path is available; if A* fails inside the corridor, the local
-  // planner falls back to a free A* over the whole local map.
+  // Half-width of the corridor around the global path that masks the local
+  // planner's A*. Used only when role==local with a global path; if A* fails
+  // inside it, the planner falls back to a free A* over the local map.
+  // (notes: params-local-corridor-radius)
   double ugv_local_corridor_radius_m;
   int ugv_global_map_min_hits;
 
