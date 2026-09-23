@@ -192,7 +192,9 @@ def launch_setup(context):
         "robot.mode": mode,
         "robot.namespace": f"/{robot}",
         # Empty topics → namespace-based defaults via with_fallback() in parameters.cpp
-        "topics.odom": "",
+        # Pilot: "" = /<robot>/odom_ground_truth; the pose-noise pair points
+        # the whole nav stack at /<robot>/odom_noisy instead.
+        "topics.odom": LaunchConfiguration("odom_topic").perform(context),
         "topics.points": "",
         "topics.cmd_vel": "",
         "topics.goal": "",
@@ -731,6 +733,9 @@ def generate_launch_description():
                               "refinement band on the scovox_node "
                               "(dscovox_lidar mode; mirrors "
                               "scovox_fine_band.yaml)."),
+        DeclareLaunchArgument("odom_topic", default_value="",
+                              description="Nav odometry topic; empty = "
+                              "/<robot>/odom_ground_truth."),
         DeclareLaunchArgument("fine_ratio_log2", default_value="2",
                               description="Fine lattice: res_fine = "
                               "voxel_resolution_m / 2^k."),
