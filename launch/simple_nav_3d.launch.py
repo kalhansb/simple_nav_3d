@@ -174,6 +174,14 @@ def launch_setup(context):
     # published on /<robot>/scovox_node/fine_tsdf_pointcloud.
     fine_band = LaunchConfiguration("fine_band").perform(context).lower() \
         in ("true", "1", "yes")
+    # Pilot (fine-band on/off pair): the lattice ratio, the refined slab and
+    # the anchor snap were hard-coded for a 0.10 m base map. At the campaign's
+    # 0.20 m base, k=2 gives 5 cm; k=3 restores 2.5 cm.
+    fine_ratio_log2 = int(LaunchConfiguration("fine_ratio_log2").perform(context))
+    fine_z_lo = float(LaunchConfiguration("fine_region_z_lo").perform(context))
+    fine_z_hi = float(LaunchConfiguration("fine_region_z_hi").perform(context))
+    fine_anchor = LaunchConfiguration("fine_anchor_enable").perform(context).lower() \
+        in ("true", "1", "yes")
 
     is_uav = mode == "uav"
 
@@ -438,15 +446,15 @@ def launch_setup(context):
             # Mirrors scovox/config/scovox_fine_band.yaml (base 0.10 m ->
             # fine 0.025 m, trunc 7.5 cm, slab brackets breast height).
             scovox_fine_extra = {
-                "fine_ratio_log2": 2,
+                "fine_ratio_log2": fine_ratio_log2,
                 "fine_sdf_trunc_voxels": 3,
                 "fine_region_margin": 0.15,
                 "fine_raw_returns": True,
-                "fine_anchor_enable": True,
+                "fine_anchor_enable": fine_anchor,
                 "fine_anchor_min_points": 12,
                 "fine_anchor_max_shift": 0.30,
-                "fine_region_z_lo": 1.0,
-                "fine_region_z_hi": 1.6,
+                "fine_region_z_lo": fine_z_lo,
+                "fine_region_z_hi": fine_z_hi,
                 "publish_fine_tsdf_pointcloud": True,
             }
         scovox_lidar_params = [{
@@ -723,5 +731,17 @@ def generate_launch_description():
                               "refinement band on the scovox_node "
                               "(dscovox_lidar mode; mirrors "
                               "scovox_fine_band.yaml)."),
+        DeclareLaunchArgument("fine_ratio_log2", default_value="2",
+                              description="Fine lattice: res_fine = "
+                              "voxel_resolution_m / 2^k."),
+        DeclareLaunchArgument("fine_region_z_lo", default_value="1.0",
+                              description="Refined slab bottom, above each "
+                              "region's base_z (m)."),
+        DeclareLaunchArgument("fine_region_z_hi", default_value="1.6",
+                              description="Refined slab top, above each "
+                              "region's base_z (m)."),
+        DeclareLaunchArgument("fine_anchor_enable", default_value="true",
+                              description="Per-scan snap of in-region hits "
+                              "onto the registered cylinder."),
         OpaqueFunction(function=launch_setup),
     ])
