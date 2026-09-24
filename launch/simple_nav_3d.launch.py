@@ -183,6 +183,15 @@ def launch_setup(context):
     fine_anchor = LaunchConfiguration("fine_anchor_enable").perform(context).lower() \
         in ("true", "1", "yes")
 
+    # Lookout experiment: the lidar renders to 100 m, and mapping + nav read
+    # the 25 m-cropped copy (explo_planner/sim/lidar_crop.py) when this is set.
+    # Empty (default) keeps /<robot>/velodyne_points.
+    lidar_points = LaunchConfiguration("lidar_points_topic").perform(context) \
+        or f"/{robot}/velodyne_points"
+    # Nav global map side (m), centred on the world origin. 80 (default) is the
+    # old hard-coded -40..40 m map; a lookout 90 m out needs a larger one.
+    nav_map_size = float(LaunchConfiguration("nav_global_map_size_m").perform(context))
+
     is_uav = mode == "uav"
 
     # ── Common parameters for all simple_nav_3d nodes ──────────────────
@@ -293,10 +302,10 @@ def launch_setup(context):
             "ugv.local_plan_resolution_m": 0.20,
             "ugv.local_plan_inflation_m": 0.20,
             "ugv.obstacle_persistence_sec": 2.0,
-            "ugv.global_map_size_m": 80.0,
+            "ugv.global_map_size_m": nav_map_size,
             "ugv.global_map_resolution_m": 0.20,
-            "ugv.global_map_origin_x_m": -40.0,
-            "ugv.global_map_origin_y_m": -40.0,
+            "ugv.global_map_origin_x_m": -0.5 * nav_map_size,
+            "ugv.global_map_origin_y_m": -0.5 * nav_map_size,
             "ugv.replan_cost_threshold_m": 6.5,
             "ugv.side_flip_cooldown_sec": 3.0,
             "ugv.global_map_min_hits": 10,
@@ -308,7 +317,7 @@ def launch_setup(context):
     # validates the literal and nothing else reads it.
     if mapping == "dscovox_lidar":
         nav_params.update({
-            "topics.points": f"/{robot}/velodyne_points",
+            "topics.points": lidar_points,
             "sensors.sensor_mount_height_m": 0.716,   # velodyne z on base_link
             "sensors.max_range_m": 20.0,
             "sensors.min_range_m": 0.8,               # reject self-hits
@@ -464,7 +473,7 @@ def launch_setup(context):
                 "mode": "rolling",
                 # THE input switch: non-empty pointcloud topic selects the
                 # lidar path; fuse_lidar_rgbd=false drops every depth/seg sub.
-                "input_pointcloud_topic": f"/{robot}/velodyne_points",
+                "input_pointcloud_topic": lidar_points,
                 "fuse_lidar_rgbd": False,
                 # gz PointCloudPacked has no per-point time field; "off" also
                 # skips the IMU subscription + lidar-imu extrinsic lookups.
@@ -733,6 +742,13 @@ def generate_launch_description():
                               "refinement band on the scovox_node "
                               "(dscovox_lidar mode; mirrors "
                               "scovox_fine_band.yaml)."),
+        DeclareLaunchArgument("lidar_points_topic", default_value="",
+                              description="Lidar cloud for mapping and the "
+                              "nav costmap (dscovox_lidar); empty = "
+                              "/<robot>/velodyne_points."),
+        DeclareLaunchArgument("nav_global_map_size_m", default_value="80.0",
+                              description="Nav global map side in m, centred "
+                              "on the origin (80 = the old -40..40 map)."),
         DeclareLaunchArgument("odom_topic", default_value="",
                               description="Nav odometry topic; empty = "
                               "/<robot>/odom_ground_truth."),
