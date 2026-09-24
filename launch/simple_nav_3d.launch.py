@@ -52,6 +52,27 @@ def launch_setup(context):
     # (notes: launch-voxel-resolution-cost)
     voxel_res = float(LaunchConfiguration("voxel_resolution_m").perform(context))
 
+    # Full-map arm (DESIGN_gen34 §12), dscovox_lidar only. Each is passed to
+    # its node only when not at its default, so every other launch keeps the
+    # exact parameter set it had.
+    full_period = float(
+        LaunchConfiguration("share_full_map_period_s").perform(context))
+    skip_raw = LaunchConfiguration("skip_unchanged_voxels").perform(context)
+    if skip_raw.strip().lower() not in ("true", "false"):
+        raise ValueError(f"skip_unchanged_voxels:= must be true or false, "
+                         f"got '{skip_raw}'")
+    skip_unchanged = skip_raw.strip().lower() == "true"
+    if not (full_period >= 0.0):
+        raise ValueError(f"share_full_map_period_s:= must be >= 0, "
+                         f"got {full_period}")
+    if (full_period > 0.0 or skip_unchanged) and mapping != "dscovox_lidar":
+        raise ValueError("share_full_map_period_s / skip_unchanged_voxels are "
+                         "wired for mapping:=dscovox_lidar only")
+    full_scovox_params = (
+        {"share_full_map_period_s": full_period} if full_period > 0.0 else {})
+    full_dscovox_params = (
+        {"skip_unchanged_voxels": True} if skip_unchanged else {})
+
     def dscovox_input_topics():
         return [f"/{robot}/scovox_node/scovox_bin"] + [
             peer_bin_pattern.format(peer=p, robot=p, self=robot)
@@ -401,6 +422,7 @@ def launch_setup(context):
                 "planning_map_max_z": 1.0,
                 "planning_map_inflation_m": 1.5,
                 **scovox_global_plan_params,
+                **full_scovox_params,
             }]
         if scovox_fine_extra:
             scovox_lidar_params.append(scovox_fine_extra)
@@ -436,6 +458,7 @@ def launch_setup(context):
                 # shallower end silently drops the excess. Only a history bound
                 # without the emulator. (notes: launch-bin-qos-depth-lidar)
                 "scovox_bin_qos_depth": 4000,
+                **full_dscovox_params,
             }],
         ))
 
@@ -602,6 +625,18 @@ def generate_launch_description():
                         "The projection + inflation run on scovox_node's "
                         "integration thread, so this is a real-time budget, "
                         "not just bandwidth. 0 = every integration frame."),
+        DeclareLaunchArgument(
+            "share_full_map_period_s", default_value="0.0",
+            description="dscovox_lidar only. > 0: scovox_node also publishes "
+                        "every non-prior voxel of its map on "
+                        "~/scovox_full at this period (sim s), for the "
+                        "full-map arm (DESIGN_gen34 section 12). 0 = off."),
+        DeclareLaunchArgument(
+            "skip_unchanged_voxels", default_value="false",
+            description="dscovox_lidar only. true: dscovox_node does not "
+                        "refold a voxel whose incoming value equals the "
+                        "stored one (same fused map, far less work for "
+                        "whole-map frames)."),
         DeclareLaunchArgument("fine_band", default_value="false",
                               description="true = enable the fine-TSDF "
                               "refinement band on the scovox_node "
