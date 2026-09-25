@@ -614,11 +614,11 @@ def generate_launch_description():
                         "envelope are rejected as occupied and the coverage "
                         "check measures the wrong area."),
         DeclareLaunchArgument(
-            "global_planning_map_resolution", default_value="0.40",
-            description="Cell size (m) of ~/global_planning_map. Coarser than "
-                        "the local map on purpose: it is inflated by the body "
-                        "radius and only used for single-cell free/occupied "
-                        "checks and a reachability flood."),
+            "global_planning_map_resolution", default_value="0.20",
+            description="Cell size (m) of ~/global_planning_map. Equal to the "
+                        "local map's: the global nav planner routes on it, and "
+                        "at 0.40 two 1.5 m halos kept a one-cell gap the 0.20 "
+                        "local map seals, so the robot dithered in the gap."),
         DeclareLaunchArgument(
             "global_planning_map_period_sec", default_value="1.0",
             description="Min seconds between ~/global_planning_map publishes. "
