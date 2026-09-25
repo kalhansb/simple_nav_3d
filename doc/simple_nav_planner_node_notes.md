@@ -325,3 +325,21 @@ at the full 10 Hz tick rate — the one case where each attempt is most
 expensive, because a blocked goal cell triggers the full endpoint
 relaxation scan.
 ```
+
+### planner-global-stamps-local-map
+
+**Global planner stamps the local map's occupied cells** — attached to `if (has_local_map_) {` (line 695)
+
+```text
+The global map is dscovox's fused grid, which accumulates evidence
+without a cap: a peer that parks where the map has seen free ground
+for a long time stays free on it for minutes. The local planning_map
+sees the peer at once and seals the gap next to it. The global path
+then kept running through that gap, the local planner broke out to
+the nearest free cell and back, and the robot dithered in place
+(lad2_n2 off s1 homing: 372 s; diag5a: two 300 s timeouts). Every
+tick, the global UGV role marks each occupied local cell occupied on
+the global map before it re-checks the latched path or plans, so a
+blocked path is replanned around the obstacle at once. A new global
+map replaces the stamped cells, and the next tick stamps them again.
+```

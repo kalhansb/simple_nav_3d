@@ -435,6 +435,18 @@ public:
         has_map_ = true;
       });
 
+    // Global UGV role: also read the local planning_map, whose occupied cells
+    // on_tick stamps onto the global map. (notes: planner-global-stamps-local-map)
+    if (!is_local_role_ && !is_uav_ && !params_.local_planning_map_topic.empty()) {
+      local_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+        params_.local_planning_map_topic,
+        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+          latest_local_map_ = *msg;
+          has_local_map_ = true;
+        });
+    }
+
     // Local role only: the global path picks the local target and the corridor
     // mask. Without a global path the local planner plans to the goal on the
     // unmasked map. (notes: planner-local-follows-global-path)
@@ -675,6 +687,27 @@ private:
       return;
     }
 
+    // Global UGV role: stamp the local map's occupied cells onto the global map
+    // before the latched path is re-checked or a new one planned. The fused
+    // global map lags a newly parked peer; without this the global path runs
+    // through it and the robot dithers at the local halo.
+    // (notes: planner-global-stamps-local-map)
+    if (has_local_map_) {
+      const auto & lm = latest_local_map_.info;
+      const auto & gm = latest_map_.info;
+      for (uint32_t ly = 0; ly < lm.height; ++ly) {
+        for (uint32_t lx = 0; lx < lm.width; ++lx) {
+          if (latest_local_map_.data[ly * lm.width + lx] < 50) continue;
+          const int gx = static_cast<int>(std::floor(
+            (lm.origin.position.x + (lx + 0.5) * lm.resolution - gm.origin.position.x) / gm.resolution));
+          const int gy = static_cast<int>(std::floor(
+            (lm.origin.position.y + (ly + 0.5) * lm.resolution - gm.origin.position.y) / gm.resolution));
+          if (gx < 0 || gy < 0 || gx >= static_cast<int>(gm.width) || gy >= static_cast<int>(gm.height)) continue;
+          latest_map_.data[static_cast<size_t>(gy) * gm.width + static_cast<size_t>(gx)] = 100;
+        }
+      }
+    }
+
     // Global UGV role replans at most every ugv_global_replan_period_sec,
     // stamped per attempt, not per success, so failing plans are limited too. A
     // goal change (force_replan_) or an invalidated latched path preempts it.
@@ -877,6 +910,8 @@ private:
   // Only set when role==local: the global planner's latest published path,
   // used to derive a local target + corridor mask in on_tick.
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
+  // Only set on the global UGV role: the local planning_map stamped in on_tick.
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr local_map_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   // UAV 3D voxel fetching.
@@ -890,6 +925,8 @@ private:
   bool has_map_{false};
   bool has_global_path_{false};
   nav_msgs::msg::Path latest_global_path_;
+  bool has_local_map_{false};
+  nav_msgs::msg::OccupancyGrid latest_local_map_;
 
   // D2. Lifetime counts of the goal-snap append: how often the true goal was
   // put back on the end of the path, and how often the segment test refused.

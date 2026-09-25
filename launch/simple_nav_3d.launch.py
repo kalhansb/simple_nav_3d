@@ -490,6 +490,11 @@ def launch_setup(context):
     if mapping in ("dscovox", "dscovox_lidar"):
         global_planner_extra["topics.planning_map"] = (
             f"/{robot}/dscovox_node/global_planning_map")
+        # UGV: the local map's occupied cells are stamped onto the global map,
+        # so the global path avoids what the local planner sees as blocked.
+        if not is_uav:
+            global_planner_extra["topics.local_planning_map"] = (
+                f"/{robot}/scovox_node/planning_map")
         if is_uav:
             global_planner_extra["scovox_get_region_service"] = f"/{robot}/dscovox_node/get_region"
 
