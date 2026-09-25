@@ -368,6 +368,27 @@ width*height sweep running a Bresenham ray per candidate cell; on the
 for the common case where the goal is plainly reachable.
 ```
 
+### ugv-clear-toward-goal-from-goal-end
+
+**Ray walked from the goal end** — in `clear_toward_goal`, attached to `for (int i = steps - 1; i >= 1; --i) {`
+
+```text
+The ray is tested from the goal end so that a goal inside an inflated halo
+fails on the first step. best_goal_endpoint_cell only runs its full sweep
+when the goal cell is occupied or unreachable, and then nearly every cell's
+ray ends in the goal's own halo; walked from the start end, each ray crossed
+the whole map first. The cell set and the all-free answer are unchanged.
+
+2026-09-25 (lad3_n2 off s1, diag7a): at 0.20 m the sweep made one global
+replan to a halo goal ~75-93 ms. A start inside a halo invalidates the
+latched path every tick, so every tick replanned, the 100 ms sim-time timer
+never went idle, and it starved the goal and odom subscriptions (same
+mutually exclusive group): the global planner kept planning to the old goal
+from a stale pose, the robot froze, and "navigator stopped publishing"
+fired. diag7a reproduced it (planner at 100% of a core, new goal never
+reached the global path in 40 s). Reversed: 25-29 ms in the same benchmark.
+```
+
 ### ugv-carve-escape-corridor
 
 **Carving an escape corridor from a halo** — in `carve_escape_corridor`, attached to `void carve_escape_corridor(` (line 409)

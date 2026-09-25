@@ -281,7 +281,10 @@ bool clear_toward_goal(
     return true;
   }
 
-  for (int i = 1; i < steps; ++i) {
+  // Walk from the goal end: a goal inside a halo then fails on the first step
+  // instead of after the whole ray. Same cells, same answer.
+  // (notes: ugv-clear-toward-goal-from-goal-end)
+  for (int i = steps - 1; i >= 1; --i) {
     const double t = static_cast<double>(i) / static_cast<double>(steps);
     GridIndex c{
       static_cast<int>(std::round(static_cast<double>(from.x) + t * static_cast<double>(dx))),
