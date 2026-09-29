@@ -314,3 +314,31 @@ TEST(UgvGlobalPlanner, FullyEnclosedGoalYieldsNoPath)
     SUCCEED() << "refused outright, which is the preferred answer";
   }
 }
+
+// The segment between the start and goal cell centres clips the corner of cell
+// (12, 10). A* routes around it, so no stretch of the path may cross it; the
+// old one-sample-per-column LOS walk pruned straight through.
+// (notes: ugv-los-supercover)
+TEST(UgvGlobalPlanner, PrunedRunNeverClipsAnOccupiedCell)
+{
+  auto g = make_grid();
+  g.data[static_cast<size_t>(10 * kW + 12)] = 100;
+  const MapSnapshot snap = simple_nav_3d::snapshot_from_occupancy_grid(g);
+  const auto centre = [](int c) { return -10.0 + (c + 0.5) * kRes; };
+
+  UgvPlanner planner(make_params());
+  const auto out = planner.compute_plan(
+    odom_at(centre(10), centre(10)), goal_at(centre(20), centre(13)), snap);
+  ASSERT_TRUE(out.has_path);
+  for (size_t i = 1; i < out.path.poses.size(); ++i) {
+    const auto & a = out.path.poses[i - 1].pose.position;
+    const auto & b = out.path.poses[i].pose.position;
+    for (int k = 0; k <= 101; ++k) {
+      const double t = k / 101.0;
+      const double x = a.x + t * (b.x - a.x);
+      const double y = a.y + t * (b.y - a.y);
+      EXPECT_FALSE(cell_occupied(snap, cell_x(snap, x), cell_y(snap, y)))
+        << "path crosses an occupied cell at (" << x << ", " << y << ")";
+    }
+  }
+}

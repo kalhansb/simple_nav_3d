@@ -14,7 +14,7 @@ One section per source file, in file order. Each entry names the function (or se
 - [src/controllers/ugv_controller.cpp](#srccontrollersugv_controllercpp) — 6
 - [src/parameters.cpp](#srcparameterscpp) — 1
 - [src/planners/uav_planner.cpp](#srcplannersuav_plannercpp) — 1
-- [src/planners/ugv_planner.cpp](#srcplannersugv_plannercpp) — 3
+- [src/planners/ugv_planner.cpp](#srcplannersugv_plannercpp) — 5
 - [src/simple_nav_navigator_node.cpp](#srcsimple_nav_navigator_nodecpp) — 4
 - [test/test_goal_identity.cpp](#testtest_goal_identitycpp) — 2
 - [test/test_ugv_planner.cpp](#testtest_ugv_plannercpp) — 5
@@ -347,6 +347,31 @@ progress along the path, so start/goal altitudes are respected.
 ```
 
 ## src/planners/ugv_planner.cpp
+
+### ugv-los-supercover
+
+**LOS walks every touched cell** — in `line_of_sight_free`, attached to `// Walks every cell the centre-to-centre segment touches.` (line 43)
+
+```text
+los_prune_path keeps a straight run only if this says it is free, and
+resample_path_uniform then puts poses along the whole run. The walk visits
+every cell the segment between the two cell centres enters, stepping x or
+y by comparing where it next crosses a column or a row boundary; an exact
+corner crossing needs both shoulder cells free. All cells visited lie in
+the a-b bounding box, so the shoulders are in bounds.
+
+The earlier walk sampled one cell per major-axis step and rounded the
+other coordinate, which skips a cell whose corner the segment clips. The
+pruned run then crossed occupied cells A* had routed around, so the
+published global path carried poses in occupied cells, path_still_valid
+failed on almost every latched path, and the side-flip rejection was
+overridden every time. 2026-09-30 (rv2lad37 off s6, diag8a): 216
+"Side flip reject overridden" in 20 min; an offline replay of 40 published
+paths on the stamped map had 39 cross an occupied cell more than 2.3 m
+from the start with the old walk and 1 with this one. The global plan
+flipped between a 24 m route and a 42 m detour every few seconds at a
+gap the local map sees flicker, and the robot shuttled until censored.
+```
 
 ### ugv-goal-endpoint-fast-path
 

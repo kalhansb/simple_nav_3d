@@ -40,22 +40,36 @@ bool line_of_sight_free(
   const GridIndex & a,
   const GridIndex & b)
 {
-  const int dx = b.x - a.x;
-  const int dy = b.y - a.y;
-  const int steps = std::max(std::abs(dx), std::abs(dy));
-  if (steps == 0) {
-    return in_bounds(a, width, height) && occupied[flatten(a, width)] == 0;
+  // Walks every cell the centre-to-centre segment touches. (notes: ugv-los-supercover)
+  const int nx = std::abs(b.x - a.x);
+  const int ny = std::abs(b.y - a.y);
+  const int sx = b.x > a.x ? 1 : -1;
+  const int sy = b.y > a.y ? 1 : -1;
+  GridIndex c = a;
+  if (!in_bounds(c, width, height) || occupied[flatten(c, width)] != 0) {
+    return false;
   }
 
-  for (int i = 0; i <= steps; ++i) {
-    const double t = static_cast<double>(i) / static_cast<double>(steps);
-    GridIndex c{
-      static_cast<int>(std::round(static_cast<double>(a.x) + t * static_cast<double>(dx))),
-      static_cast<int>(std::round(static_cast<double>(a.y) + t * static_cast<double>(dy)))};
-    if (!in_bounds(c, width, height)) {
-      return false;
+  for (int ix = 0, iy = 0; ix < nx || iy < ny; ) {
+    const int decision = (1 + 2 * ix) * ny - (1 + 2 * iy) * nx;
+    if (decision == 0) {
+      if (occupied[flatten(GridIndex{c.x + sx, c.y}, width)] != 0 ||
+        occupied[flatten(GridIndex{c.x, c.y + sy}, width)] != 0)
+      {
+        return false;
+      }
+      c.x += sx;
+      c.y += sy;
+      ++ix;
+      ++iy;
+    } else if (decision < 0) {
+      c.x += sx;
+      ++ix;
+    } else {
+      c.y += sy;
+      ++iy;
     }
-    if (occupied[flatten(c, width)] != 0) {
+    if (!in_bounds(c, width, height) || occupied[flatten(c, width)] != 0) {
       return false;
     }
   }
