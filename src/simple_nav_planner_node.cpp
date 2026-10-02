@@ -136,9 +136,14 @@ const char * side_name(int side)
   return "center";
 }
 
+// Checked from the pose nearest the robot, skipping the occupied run it stands
+// in out to 2 m, the straight-line escape-carve budget (a diagonal carve can
+// reach 2.55 m): compute_plan frees that run itself, so it must not invalidate
+// the path (it overrode 479/494 side-flip rejections in pm38lad s5/s7).
 bool path_still_valid(
   const nav_msgs::msg::Path & path,
-  const nav_msgs::msg::OccupancyGrid & grid)
+  const nav_msgs::msg::OccupancyGrid & grid,
+  const geometry_msgs::msg::Point & current)
 {
   if (path.poses.empty()) return false;
   const double ox = grid.info.origin.position.x;
@@ -148,11 +153,22 @@ bool path_still_valid(
   const int h = static_cast<int>(grid.info.height);
   if (w <= 0 || h <= 0 || res <= 0.0) return false;
 
-  for (const auto & pose : path.poses) {
-    int gx = static_cast<int>(std::floor((pose.pose.position.x - ox) / res));
-    int gy = static_cast<int>(std::floor((pose.pose.position.y - oy) / res));
+  size_t first = 0;
+  double best = std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < path.poses.size(); ++i) {
+    const auto & p = path.poses[i].pose.position;
+    const double d = std::hypot(p.x - current.x, p.y - current.y);
+    if (d < best) { best = d; first = i; }
+  }
+  bool in_start_run = true;
+  for (size_t i = first; i < path.poses.size(); ++i) {
+    const auto & p = path.poses[i].pose.position;
+    int gx = static_cast<int>(std::floor((p.x - ox) / res));
+    int gy = static_cast<int>(std::floor((p.y - oy) / res));
     if (gx < 0 || gy < 0 || gx >= w || gy >= h) continue;  // OOB/unknown ok
-    if (grid.data[gy * w + gx] >= 50) return false;  // goes through occupied
+    if (grid.data[gy * w + gx] < 50) { in_start_run = false; continue; }
+    if (in_start_run && std::hypot(p.x - current.x, p.y - current.y) <= 2.0) continue;
+    return false;  // goes through occupied
   }
   return true;
 }
@@ -720,7 +736,7 @@ private:
       bool skip = !force_replan_ &&
         since_attempt >= 0.0 &&
         since_attempt < params_.ugv_global_replan_period_sec;
-      if (skip && has_prev_path_ && !path_still_valid(prev_full_path_, latest_map_)) {
+      if (skip && has_prev_path_ && !path_still_valid(prev_full_path_, latest_map_, current)) {
         skip = false;
       }
       if (skip) {
@@ -784,7 +800,7 @@ private:
         const bool in_cooldown = since_last_flip < params_.ugv_side_flip_cooldown_sec;
 
         if (side_flip && (non_improving || in_cooldown)) {
-          if (path_still_valid(prev_full_path_, latest_map_)) {
+          if (path_still_valid(prev_full_path_, latest_map_, current)) {
             RCLCPP_DEBUG(
               get_logger(),
               "Planner side flip rejected: prev=%s new=%s prev_cost=%.2f new_cost=%.2f cooldown=%.1f/%.1fs",
@@ -871,7 +887,7 @@ private:
           is_local_role_ ? "local" : "global",
           goal_snap_appends_, goal_snap_blocked_, kGoalSnapMaxM);
       }
-    } else if (has_prev_path_ && (is_uav_ || path_still_valid(prev_full_path_, latest_map_))) {
+    } else if (has_prev_path_ && (is_uav_ || path_still_valid(prev_full_path_, latest_map_, current))) {
       // Re-stamp orientation on reused path if last waypoint is near goal.
       if (!prev_full_path_.poses.empty()) {
         const auto & wp = prev_full_path_.poses.back().pose.position;

@@ -133,8 +133,8 @@ planner reads the same collapsed array: ugv_planner.cpp's
 line_of_sight_free (:46 zero-step, :57 the ray), world_point_free (:108),
 the A* expansion itself (:650), and all four tiers of the goal-relocation
 search best_goal_endpoint_cell (:328 direct accept, :338 :366 :392 the
-widening scans). simple_nav_planner_node.cpp's path_still_valid (:154)
-tests >= 50 on the raw grid directly, which collapses -1 the same way.
+widening scans). simple_nav_planner_node.cpp's path_still_valid (:169)
+tests < 50 on the raw grid directly, which collapses -1 the same way.
 A* therefore routes through unobserved space as a matter of course. Making
 this one guard refuse on in-bounds unknown would make the 0.6 m append
 strictly stricter than the A* that produced the path it is appending to:
