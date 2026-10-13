@@ -10,6 +10,7 @@ The package is split into four ROS 2 nodes:
   - Accepts incoming goal poses.
   - Republishes a persistent active goal for downstream nodes.
   - Clears the active goal when the robot reaches tolerance.
+  - Follows a `goal_route` waypoint by waypoint: the active goal is the next waypoint, passed within `route.pass_radius_m`; the remaining route is echoed on `active_route`.
 - `simple_nav_costmap_node`
   - Builds a local occupancy map from odometry + RGB-D point cloud.
   - Publishes both inflated and raw local maps.

@@ -72,6 +72,10 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   const std::string local_planning_map_topic_raw = node.declare_parameter<std::string>("topics.local_planning_map", "");
   const std::string robot_body_polygon_topic_raw =
     node.declare_parameter<std::string>("topics.robot_body_polygon", "");
+  const std::string goal_route_topic_raw =
+    node.declare_parameter<std::string>("topics.goal_route", "");
+  const std::string active_route_topic_raw =
+    node.declare_parameter<std::string>("topics.active_route", "");
 
   if (p.robot_namespace.empty()) {
     p.robot_namespace = "/" + p.robot_name;
@@ -98,6 +102,10 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   p.robot_body_polygon_topic = with_fallback(
     robot_body_polygon_topic_raw,
     join_ns_topic(p.robot_namespace, "simple_nav_3d/robot_body_polygon"));
+  p.goal_route_topic = with_fallback(
+    goal_route_topic_raw, join_ns_topic(p.robot_namespace, "goal_route"));
+  p.active_route_topic = with_fallback(
+    active_route_topic_raw, join_ns_topic(p.robot_namespace, "simple_nav_3d/active_route"));
 
   p.map_frame = node.declare_parameter<std::string>("frames.map", "map");
   p.odom_frame = node.declare_parameter<std::string>("frames.odom", "odom");
@@ -180,6 +188,8 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   p.uav_goal_yaw_tol_rad = node.declare_parameter<double>("uav.goal_yaw_tol_rad", 0.25);
   p.uav_nominal_height_m = node.declare_parameter<double>("uav.nominal_height_m", 1.5);
 
+  p.route_pass_radius_m = node.declare_parameter<double>("route.pass_radius_m", 2.0);
+
   p.ground_filter_bin_size_m = node.declare_parameter<double>(
     "ground_filter.bin_size_m", 0.5);
   p.ground_filter_tolerance_m = node.declare_parameter<double>(
@@ -214,6 +224,8 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
   require_absolute_topic(p.global_map_topic, "topics.global_map");
   require_absolute_topic(p.planning_map_topic, "topics.planning_map");
   require_absolute_topic(p.robot_body_polygon_topic, "topics.robot_body_polygon");
+  require_absolute_topic(p.goal_route_topic, "topics.goal_route");
+  require_absolute_topic(p.active_route_topic, "topics.active_route");
 
   require_non_empty(p.map_frame, "frames.map");
   require_non_empty(p.odom_frame, "frames.odom");
@@ -306,6 +318,13 @@ NodeParameters load_and_validate_params(rclcpp::Node & node)
     }
   } else {
     throw std::runtime_error("robot.mode must be 'ugv' or 'uav'");
+  }
+
+  // After the mode check, so final_goal_tolerance() reads a validated mode.
+  // Load-bearing: at or below the tolerance, the arrival test could fire on an
+  // intermediate waypoint and end a route halfway. (notes: nav-route-pass-radius-check)
+  if (p.route_pass_radius_m <= final_goal_tolerance(p)) {
+    throw std::runtime_error("route.pass_radius_m must be > the final goal tolerance");
   }
 
   return p;

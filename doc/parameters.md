@@ -38,6 +38,8 @@ Validation rules:
 - `topics.planning_map`
 - `topics.local_planning_map`
 - `topics.robot_body_polygon`
+- `topics.goal_route` (navigator input, default `/<robot>/goal_route`)
+- `topics.active_route` (navigator output, default `/<robot>/simple_nav_3d/active_route`)
 
 Notes:
 
@@ -149,7 +151,17 @@ Used by:
 
 Used by local mapper's ground filtering pipeline.
 
-## 9. Launch overrides and mode presets
+## 9. Route following
+
+- `route.pass_radius_m` (default `2.0`; the launch sets `2.0`, RP §12 D4)
+
+Used by the navigator only: it advances a `goal_route` to its next waypoint once the robot is inside this radius of the current one. Every node declares it.
+
+Validation:
+
+- must be greater than the final goal tolerance (`max(0.05, ugv.goal_xy_tol_m)` for UGV, `max(0.05, uav.goal_xyz_tol_m)` for UAV), checked after the mode check. Otherwise the arrival test could fire on an intermediate waypoint and end a route halfway.
+
+## 10. Launch overrides and mode presets
 
 `simple_nav_3d.launch.py` sets practical mode-dependent defaults and overrides for many parameters at launch time, including:
 

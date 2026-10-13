@@ -125,6 +125,15 @@ if(BUILD_TESTING)
     geometry_msgs
     nav_msgs
   )
+  # RouteProgress is header-only (route_progress.hpp) for the same reason as
+  # same_goal_pose: its caller is the navigator node. It decides which route
+  # waypoint is the active goal and when a goal_pose ends the route.
+  ament_add_gtest(test_route_progress test/test_route_progress.cpp)
+  target_link_libraries(test_route_progress simple_nav_3d_core)
+  ament_target_dependencies(test_route_progress
+    geometry_msgs
+    nav_msgs
+  )
 endif()
 
 ament_export_include_directories(include)

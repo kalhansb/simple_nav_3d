@@ -153,6 +153,8 @@ def launch_setup(context):
         "topics.local_map": "",
         "topics.global_map": "",
         "topics.robot_body_polygon": "",
+        "topics.goal_route": "",
+        "topics.active_route": "",
         # Frames
         "frames.map": "map",
         "frames.odom": f"{robot}/odom",
@@ -171,6 +173,8 @@ def launch_setup(context):
         "mission.progress_timeout_sec": 8.0,
         "mission.progress_min_distance_m": 0.20,
         "mission.use_sim_time": True,
+        # Route following (navigator; RP §6.4 D4)
+        "route.pass_radius_m": 2.0,
         # Safety
         "safety.cmd_vel_timeout_sec": 0.5,
         "safety.stop_on_tf_failure": True,

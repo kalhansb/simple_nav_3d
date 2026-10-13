@@ -10,12 +10,13 @@ One section per source file, in file order. Each entry names the function (or se
 - [include/simple_nav_3d/controllers/controller_base.hpp](#includesimple_nav_3dcontrollerscontroller_basehpp) — 2
 - [include/simple_nav_3d/controllers/ugv_controller.hpp](#includesimple_nav_3dcontrollersugv_controllerhpp) — 1
 - [include/simple_nav_3d/grid_utils.hpp](#includesimple_nav_3dgrid_utilshpp) — 1
-- [include/simple_nav_3d/parameters.hpp](#includesimple_nav_3dparametershpp) — 3
+- [include/simple_nav_3d/parameters.hpp](#includesimple_nav_3dparametershpp) — 4
+- [include/simple_nav_3d/route_progress.hpp](#includesimple_nav_3droute_progresshpp) — 2
 - [src/controllers/ugv_controller.cpp](#srccontrollersugv_controllercpp) — 6
-- [src/parameters.cpp](#srcparameterscpp) — 1
+- [src/parameters.cpp](#srcparameterscpp) — 2
 - [src/planners/uav_planner.cpp](#srcplannersuav_plannercpp) — 1
 - [src/planners/ugv_planner.cpp](#srcplannersugv_plannercpp) — 5
-- [src/simple_nav_navigator_node.cpp](#srcsimple_nav_navigator_nodecpp) — 4
+- [src/simple_nav_navigator_node.cpp](#srcsimple_nav_navigator_nodecpp) — 7
 - [test/test_goal_identity.cpp](#testtest_goal_identitycpp) — 2
 - [test/test_ugv_planner.cpp](#testtest_ugv_plannercpp) — 5
 
@@ -214,6 +215,87 @@ a global path is available; if A* fails inside the corridor, the local
 planner falls back to a free A* over the whole local map.
 ```
 
+### params-route-pass-radius
+
+**Why the route pass radius is 2.0 m** — in `NodeParameters — declarations`, attached to `double route_pass_radius_m;` (line 100)
+
+```text
+Gen 41 (2026-10-12), route planner design RP §6.4 and §12 D4. The navigator
+advances a goal_route from w_k to w_k+1 once the robot is inside this radius
+of w_k (and w_k is not the last waypoint).
+
+2.0 m guarantees line of sight: waypoints and the robot's path both keep the
+map's 1.5 m inflation from raw obstacles, and a segment whose two ends clear
+an obstacle by 1.5 m and that crosses it is at least 3 m long. So a pass
+within 2.0 m always has a clear line to the viewpoint and never counts across
+a trunk. With a 20 m 360-degree sensor the view hardly changes within 2 m,
+and explo's next refresh picks up anything the offset missed.
+
+It also keeps the pass away from the controller's end-of-goal behaviour: the
+controller slows only in the last 0.8 m of its path and rotates to the goal
+yaw only within 0.2 m of active_goal, so a pass at 2 m happens at speed and
+without a rotation.
+
+Every nav node declares it because they share load_and_validate_params; only
+the navigator reads it. The loader rejects a value at or below the final goal
+tolerance (see nav-route-pass-radius-check).
+```
+
+## include/simple_nav_3d/route_progress.hpp
+
+### route-id-last-accepted
+
+**Route ids compare against the last accepted id** — in `RouteProgress::accept`, attached to `Intake accept(const nav_msgs::msg::Path & route)` (line 39)
+
+```text
+Gen 41 (2026-10-12), spec_nav §7.1, BUILD_PLAN R19. A goal_route whose id
+equals the LAST ACCEPTED id is a keep-alive and changes nothing, whether
+that route is still held, already finished, or was preempted by a
+goal_pose. The id is not forgotten on finish() or preempt().
+
+Why not "the id currently held":
+- goal_pose and goal_route are separate topics and nothing orders delivery
+  across them. A keep-alive in flight can land after the brake goal; if a
+  preempted id were forgotten, that keep-alive would revive the route the
+  brake had just stopped.
+- A keep-alive that lands after the last-waypoint arrival must not re-arm a
+  finished route from explo's lagging view of it.
+- No legitimate case is lost: explo resumes after a hold with a NEW id, and
+  any change of content gets a new id. Ids are explo's sim now() in ns,
+  bumped by 1 ns on a tie.
+
+Same id means same content is explo's rule. The navigator does not compare
+content: a same-id message with different waypoints is ignored, because
+re-syncing on it would break explo's count-based progress (k = n_sent -
+n_remaining read off active_route).
+
+has_id_, not id 0, marks "nothing accepted yet", so a zero stamp is a valid
+first id. An empty or non-finite route is rejected before the id test and
+is not recorded, so it can neither clear the held route nor burn an id.
+
+Single goals keep their re-arm after arrival (goal_pose still uses it);
+only routes refuse a repeat id.
+```
+
+### route-goal-pose-ends-route
+
+**Why goal_pose_is_repeat exists** — in `goal_pose_is_repeat`, attached to `inline bool goal_pose_is_repeat(` (line 137)
+
+```text
+Gen 41 (2026-10-12), RP §6.1. A goal_pose arriving while a route is held
+ends the route FIRST, and only then runs the navigator's same-goal test.
+The order matters: explo's brake and the team behaviours stop or preempt a
+route by publishing a goal_pose. If the same-goal early return ran first, a
+goal_pose equal to the current waypoint w_k would be swallowed as a repeat
+while the route went on advancing past it.
+
+The navigator's goal callback is in an executable, which cannot be linked
+into a test, so the ordering lives here where test_route_progress.cpp can
+pin it (RP §10, "goal_pose clear"). Without it the order could only be held
+by code review. With no route held, preempt() is a no-op and the function
+is exactly has_active_goal && same_goal_pose(), as before.
+```
+
 ## src/controllers/ugv_controller.cpp
 
 ### ugv-arc-clearance
@@ -332,6 +414,27 @@ for the dscovox pipeline and gives every other caller the same number the
 controller used to hardcode (rounded from 0.15 to the launch's 0.2).
 ```
 
+### nav-route-pass-radius-check
+
+**Why the pass radius must exceed the final tolerance** — in `load_and_validate_params`, attached to `if (p.route_pass_radius_m <= final_goal_tolerance(p)) {` (line 323)
+
+```text
+Gen 41 (2026-10-12), spec_nav §4.2. The navigator relies on one invariant:
+after RouteProgress::advance(), either w_k is the last waypoint or it is at
+least the pass radius from the robot. With the radius above the final goal
+tolerance, the navigator's existing arrival test (dist < tolerance, 0.2 m
+for the UGV) can therefore only fire on the last waypoint.
+
+If a radius at or below the tolerance were allowed, an intermediate
+waypoint could satisfy the arrival test first. The navigator would declare
+the route complete halfway and stop publishing; nothing would fail loudly,
+the planners would clear after their 10 s stale-goal count, and explo would
+only see active_route fall silent.
+
+The check sits after the mode check because final_goal_tolerance() picks the
+UGV or UAV tolerance by mode.
+```
+
 ## src/planners/uav_planner.cpp
 
 ### uav-height-penalty
@@ -448,6 +551,27 @@ out so the planner has somewhere to escape to. Budget the carve to
 
 ## src/simple_nav_navigator_node.cpp
 
+### nav-goal-pose-ends-route
+
+**A goal_pose ends the route before the same-goal test** — in `SimpleNavNavigatorNode`, attached to `bool route_was_active = false;` (line 36)
+
+```text
+Gen 41 (2026-10-12), RP §6.1, spec_nav §5.1. Any goal_pose ends an active
+route (logged as `Navigator route end: ... reason=goal_pose`) before the
+same-goal test; see goal_pose_is_repeat() for why the order matters.
+
+Consequences:
+- A goal_pose equal to w_k ends the route and is then ignored as a repeat,
+  so the robot carries on to w_k as a single goal: 0.2 m arrival, rotation
+  to its yaw, no further passes.
+- The brake goal behaves as today: accepted, arrival on the next tick, and
+  the planner's clear_plan_state stops the robot.
+- Explo must never publish goal_pose while it holds a route (BUILD_PLAN
+  R22): its old goal keep-alive would end the route at the first pass.
+
+With no route held this is exactly the old test.
+```
+
 ### nav-ignore-same-goal
 
 **Ignoring a re-publish of the same goal** — in `SimpleNavNavigatorNode`, attached to `if (has_active_goal_ && same_goal_pose(active_goal_.pose, msg->pose)) {` (line 28)
@@ -487,6 +611,44 @@ re-publish. The FIRST arrival on a given goal is the interesting one
 and stays at INFO; the repeats drop to DEBUG. `active_goal_` is still
 intact here (only the flag was cleared), so the comparison is against
 the goal that was just reached.
+```
+
+### nav-route-advance-on-accept
+
+**A new route is advanced before its first publish** — in `on_route`, attached to `if (has_odom_) {` (line 178)
+
+```text
+Gen 41 (2026-10-12), spec_nav §7.8. A new route's w0 can already be inside
+the pass radius, typically the robot's own position or a viewpoint it just
+drove past. If the callback published w0 and the next tick then passed it,
+the planner would see two goal changes within 50 ms, each dropping its
+global path and forcing a replan. Advancing first means the first goal
+published is the w_k the robot should actually drive to.
+
+Before odom has arrived nothing can be passed, so w0 is published and the
+first tick with odom advances it.
+```
+
+### nav-route-forced-replans
+
+**What forced_replans counts** — in `advance_route`, attached to `const double tol = params_.mode == "uav" ? params_.uav_goal_xyz_tol_m : params_.ugv_goal_xy_tol_m;` (line 199)
+
+```text
+Gen 41 (2026-10-12), spec_nav §7.4. The navigator cannot see the planner.
+simple_nav_planner_node's active_goal callback drops its plan cache and its
+global path, and forces a replan on its next tick, when the goal moves more
+than max(0.20, 2 * goal tolerance): 0.4 m for the UGV. This copies that
+formula so the route-end line reports how many passes cost a forced replan;
+the planner is unchanged and its own "Goal changed" INFO is hidden by the
+launch's warn log level. If the planner's formula changes, change this copy.
+
+It counts calls, not waypoints: chained passes in one tick publish only the
+last w_k, so they cost one replan and count once.
+
+It is a mirror, not a measurement. A pass made inside the accept callback is
+compared against w0, which was never published; the planner saw one change
+(old goal to w_k), which is the accept's own replan. So the count can be one
+higher than the pass-caused replans of that route.
 ```
 
 ### nav-had-goal-ever

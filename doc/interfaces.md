@@ -11,6 +11,8 @@ When topic parameters are left empty, defaults are generated under `robot.namesp
 - cmd_vel: `/<robot>/cmd_vel`
 - goal: `/<robot>/goal_pose`
 - active_goal: `/<robot>/simple_nav_3d/active_goal`
+- goal_route: `/<robot>/goal_route`
+- active_route: `/<robot>/simple_nav_3d/active_route`
 - global_path: `/<robot>/simple_nav_3d/global_path`
 - local_path: `/<robot>/simple_nav_3d/local_path`
 - local_map: `/<robot>/simple_nav_3d/local_map`
@@ -26,16 +28,30 @@ Subscribes:
 
 - `topics.goal` (`geometry_msgs/PoseStamped`)
 - `topics.odom` (`nav_msgs/Odometry`)
+- `topics.goal_route` (`nav_msgs/Path`, map frame): an ordered route of waypoints w0..w_last. `header.stamp` is the route id.
 
 Publishes:
 
 - `topics.active_goal` (`geometry_msgs/PoseStamped`)
+- `topics.active_route` (`nav_msgs/Path`): the remaining waypoints w_k..w_last, under the held route's header (so it carries the route id). Published with `active_goal` on every 50 ms tick while a route is active, once more ([w_last]) on the tick it completes, so a pass of the second-to-last waypoint in that tick still reaches explo, and nothing after it ends.
 
 Behavior:
 
 - De-duplicates identical incoming goal positions.
 - Periodically republishes active goal.
 - Clears active goal when within final tolerance.
+
+Route following (option C of the route planner design, `DESIGN_route_planner.md` §6 in the campaign folder, cited as RP in the code). With no `goal_route` ever received, every path above runs exactly as before.
+
+- **Intake.** A `goal_route` whose id (`sec`·1e9 + `nanosec`) equals the **last accepted** id is a keep-alive and is ignored, even after that route finished or was preempted, so a late keep-alive cannot revive it. A new id replaces any held route and sets k = 0. An empty route, or one with a non-finite x/y/z, is ignored with a WARN: it does not clear the held route and its id is not recorded. There is no clear-on-empty; a `goal_pose` (the brake) is the stop.
+- **Active goal.** While a route is active, `active_goal` is w_k, with the route's header (frame and stamp = route id, constant across legs).
+- **Pass.** On accept (when odom has arrived) and on every tick before the arrival test: while w_k is not the last waypoint and the robot is within `route.pass_radius_m` of it, k advances. Only w_k is tested (no skip-ahead), and several waypoints can pass in one tick; only the last of them is published. Distance is 2D for UGV, 3D for UAV, as for arrival.
+- **End.** The last waypoint uses the normal final-tolerance arrival; the navigator then stops publishing both topics. Because the pass radius must exceed the final tolerance, arrival can only fire on the last waypoint.
+- **Preempt.** A `goal_pose` ends any active route *before* the same-goal test, so even a goal equal to w_k ends the route (the robot then carries on to w_k as a single goal).
+- **Log lines** (INFO; `id` is `sec.nanosec`, `wp` and `at_wp` are the 0-based index k over the route size n):
+  - `Navigator accepted route id=<id> wps=<n> first=(x= y=)`
+  - `Navigator route leg: id=<id> wp=<k>/<n> passed=<m> (x= y= z= yaw=)`, one per tick that passed any waypoint; the pose is the new w_k.
+  - `Navigator route end: id=<id> reason=<completed|goal_pose|replaced> at_wp=<k>/<n> passes=<total> forced_replans=<count>`. `forced_replans` counts the ticks (and the accept) whose pass moved w_k by more than max(0.20, 2·goal tolerance), a copy of the planner's goal-change reset test; chained passes in one tick count once.
 
 ### 2.2 simple_nav_costmap_node
 

@@ -27,6 +27,8 @@ struct NodeParameters
   std::string cmd_vel_topic;
   std::string goal_topic;
   std::string active_goal_topic;
+  std::string goal_route_topic;    // nav_msgs/Path in; header.stamp is the route id
+  std::string active_route_topic;  // nav_msgs/Path out; w_k..w_last, same id
   std::string global_path_topic;
   std::string local_path_topic;
   std::string local_map_topic;
@@ -92,6 +94,10 @@ struct NodeParameters
   // (notes: params-local-corridor-radius)
   double ugv_local_corridor_radius_m;
   int ugv_global_map_min_hits;
+
+  // The navigator advances a route's waypoint k inside this radius (RP §6.4,
+  // D4). Validated > final_goal_tolerance(). (notes: params-route-pass-radius)
+  double route_pass_radius_m;
 
   double uav_max_vx_mps;
   double uav_max_vy_mps;
